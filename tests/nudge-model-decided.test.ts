@@ -11,6 +11,9 @@ import { defaultConfig } from "acp-kernel";
 process.env.NODE_ENV = "test";
 
 // #2228 end-to-end: model-decided nudge timing through the REAL pipeline.
+// The client requests carry reasoning_effort:"high" so every decision side
+// call must come back with the knob reduced ("minimal") — extended thinking
+// would burn the 200-token answer budget (#2228 follow-up ruling).
 // A session must cross the GENTLE-GROWTH tier-1 arm (usage < maxContextLimitPct
 // so the pressure band — which NEVER consults the model per the owner ruling —
 // stays closed, while tokenCount grew past nudgeGrowthTokens since the last
@@ -138,7 +141,7 @@ async function runScenario(fixture: Fixture, verdict: Verdict | "off") {
             const resp = await fetch(url, {
                 method: "POST",
                 headers: { "content-type": "application/json", "x-acp-session": sessionId },
-                body: JSON.stringify({ model: "deepseek-v4-flash", messages: turn }),
+                body: JSON.stringify({ model: "deepseek-v4-flash", messages: turn, reasoning_effort: "high" }),
             });
             assert.equal(resp.status, 200);
             await resp.text();
@@ -158,6 +161,7 @@ describe("#2228 model-decided nudge timing (e2e)", () => {
         const { main, sides } = await runScenario(GENTLE, "yes");
         assert.equal(sides.length, 1, "exactly one decision side call");
         assert.deepEqual(sides.map((s) => s.max_tokens), [200]);
+        assert.deepEqual(sides.map((s) => s.reasoning_effort), ["minimal"], "extended thinking reduced for the JSON answer");
         const q = String(sides[0].messages[sides[0].messages.length - 1].content);
         assert.ok(q.includes("[bili-compress-decision]"), "side call ends with the decision question");
         assert.equal(main.messages.length, GENTLE.baseMainLen + 1, "directive occupies the nudge slot");
@@ -170,12 +174,14 @@ describe("#2228 model-decided nudge timing (e2e)", () => {
     it("gentle-growth no → nothing injected", async () => {
         const { main, sides } = await runScenario(GENTLE, "no");
         assert.equal(sides.length, 1);
+        assert.deepEqual(sides.map((s) => s.reasoning_effort), ["minimal"]);
         assert.equal(main.messages.length, GENTLE.baseMainLen, "no nudge slot consumed");
     });
 
     it("gentle-growth garbage prose → nothing injected (never degrades to blind compress)", async () => {
         const { main, sides } = await runScenario(GENTLE, "garbage");
         assert.equal(sides.length, 1);
+        assert.deepEqual(sides.map((s) => s.reasoning_effort), ["minimal"]);
         assert.equal(main.messages.length, GENTLE.baseMainLen, "malformed answer injects nothing");
     });
 

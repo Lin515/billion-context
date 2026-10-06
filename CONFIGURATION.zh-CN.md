@@ -1100,7 +1100,7 @@
 - **类型：** `boolean`
 - **默认值：** *（关闭，除非显式设置）*
 - **状态：** ACTIVE (#2228)
-- **说明：** 模型自决的压缩时机。开启后，**温和增长的 tier-1** 提醒触发时不再立即注入 advisory 文本，而是先发一次短 **side call**：复用会话已缓存的前缀（同样的 system/tools/messages 前缀、极小输出预算、15 秒空闲超时），让模型以当前任务为前提判断"现在压缩是否净收益为正"，并可给出建议折叠范围与简短主题。回答必须是严格 JSON（`{"compress": true|false, "range": "mNNNNN-mNNNNN"?, "topic": "?"}`），其余任何输出都按失败处理。有效的 "yes" 会注入一条明确的压缩指令并带程序最终确定的范围——建议范围只有完整落在某个存活可压缩范围内才被采纳，否则取最大的存活范围；"no"、格式错误或超时则本轮不注入任何东西。**连续 3 次硬失败**后，下一次 arm 回退到原有 advisory 一次并把计数清零（自愈阶梯）。**OVER-LIMIT / EMERGENCY 压力档与 tier-2/3 蒸馏永远不经过决策**——那种压力下模型没有否决权，advisory 直接注入（owner 裁定）。该字段仅宿主侧使用——不传入内核。默认关闭。
+- **说明：** 模型自决的压缩时机。开启后，**温和增长的 tier-1** 提醒触发时不再立即注入 advisory 文本，而是先发一次短 **side call**：复用会话已缓存的前缀（同样的 system/tools/messages 前缀、极小输出预算、15 秒空闲超时），让模型以当前任务为前提判断"现在压缩是否净收益为正"，并可给出建议折叠范围与简短主题。回答必须是严格 JSON（`{"compress": true|false, "range": "mNNNNN-mNNNNN"?, "topic": "?"}`），其余任何输出都按失败处理。有效的 "yes" 会注入一条明确的压缩指令并带程序最终确定的范围——建议范围只有完整落在某个存活可压缩范围内才被采纳，否则取最大的存活范围；"no"、格式错误或超时则本轮不注入任何东西。**连续 3 次硬失败**后，下一次 arm 回退到原有 advisory 一次并把计数清零（自愈阶梯）。**OVER-LIMIT / EMERGENCY 压力档与 tier-2/3 蒸馏永远不经过决策**——那种压力下模型没有否决权，advisory 直接注入（owner 裁定）。决策 side call 还会在**客户端开启了扩展思考时把它降档**——JSON 式的是/否回答不应把极小的输出预算烧在推理上：anthropic `thinking:{type:"disabled"}`、openai-chat `reasoning_effort:"minimal"` / `reasoning:{effort:"minimal"}`、responses `reasoning:{effort:"low"}`、google `generationConfig.thinkingConfig.thinkingBudget:0`；客户端没发的键绝不新增（wire 保真），且只动顶层请求字段，消息内容（含签名思考块）逐字节不动。该字段仅宿主侧使用——不传入内核。默认关闭。
 
 #### `nudgeDecisionMaxTokens`
 

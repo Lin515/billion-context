@@ -4201,6 +4201,11 @@ async function prepareAnthropic(
             } else if (useDecide) {
                 const ranges = turn.nudge.compressibleRanges ?? [];
                 const sideBody: Record<string, unknown> = { ...parsed, messages: [...rebuiltMessages, { role: "user", content: buildDecisionPrompt(ranges) }], system: systemOut, tools: toolsOut, stream: false, max_tokens: decide.maxTokens };
+                // #2228: a JSON yes/no needs no extended thinking — it would burn
+                // the tiny output budget and add latency. Reduce ONLY when the
+                // client actually enabled thinking (wire-fidelity: never touch a
+                // key the client did not send).
+                if (parsed.thinking !== undefined) sideBody.thinking = { type: "disabled" };
                 delete sideBody.prompt_cache_key;
                 const outcome = await runNudgeDecision({ req, opts, protocol: "anthropic", sideBody, session, log });
                 if (outcome.kind === "yes") {
@@ -4482,6 +4487,10 @@ async function prepareOpenai(
                 // the side call's bytes match the main request's cache line.
                 const stable = normalizeStrictEchoReasoning([...rebuiltMessages], isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
                 const sideBody: Record<string, unknown> = { ...parsed, messages: [...stable, { role: "user", content: buildDecisionPrompt(ranges) }], tools: toolsOut as OpenAITool[] | undefined, stream: false };
+                // #2228: no extended thinking for the JSON yes/no — reduce only
+                // when the client actually sent a reasoning knob (wire-fidelity).
+                if ((parsed as Record<string, unknown>).reasoning_effort !== undefined) sideBody.reasoning_effort = "minimal";
+                if ((parsed as Record<string, unknown>).reasoning !== undefined) sideBody.reasoning = { effort: "minimal" };
                 sideBody[typeof (parsed as Record<string, unknown>).max_completion_tokens === "number" ? "max_completion_tokens" : "max_tokens"] = decide.maxTokens;
                 delete sideBody.prompt_cache_retention;
                 const outcome = await runNudgeDecision({ req, opts, protocol: "openai", sideBody, session, log });
@@ -4763,7 +4772,11 @@ async function prepareGoogle(
                 }
             } else if (useDecide) {
                 const ranges = turn.nudge.compressibleRanges ?? [];
-                const sideBody: Record<string, unknown> = { ...parsed, contents: [...rebuiltContents, { role: "user", parts: [{ text: buildDecisionPrompt(ranges) }] }], tools: toolsOut, systemInstruction, generationConfig: { ...(parsed.generationConfig ?? {}), maxOutputTokens: decide.maxTokens } };
+                const gc = parsed.generationConfig ?? {};
+                // #2228: no extended thinking for the JSON yes/no — reduce only
+                // when the client actually sent a thinking knob (wire-fidelity).
+                if (gc.thinkingConfig !== undefined) gc.thinkingConfig = { ...(gc.thinkingConfig as Record<string, unknown>), thinkingBudget: 0 };
+                const sideBody: Record<string, unknown> = { ...parsed, contents: [...rebuiltContents, { role: "user", parts: [{ text: buildDecisionPrompt(ranges) }] }], tools: toolsOut, systemInstruction, generationConfig: { ...gc, maxOutputTokens: decide.maxTokens } };
                 const outcome = await runNudgeDecision({ req, opts, protocol: "google", sideBody, session, log });
                 if (outcome.kind === "yes") {
                     const span = resolveDecisionRange(outcome, ranges);
@@ -5130,6 +5143,9 @@ async function prepareResponses(
                     ? [{ type: "message", role: "user", content: rebuiltInput }]
                     : normalizeStrictEchoResponsesInput([...rebuiltInput], isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
                 const sideBody: Record<string, unknown> = { ...parsed, input: [...stableItems, { type: "message", role: "user", content: buildDecisionPrompt(ranges) }], tools: toolsOut, stream: false, max_output_tokens: decide.maxTokens };
+                // #2228: no extended thinking for the JSON yes/no — reduce only
+                // when the client actually sent a reasoning knob (wire-fidelity).
+                if ((parsed as Record<string, unknown>).reasoning !== undefined) sideBody.reasoning = { effort: "low" };
                 const outcome = await runNudgeDecision({ req, opts, protocol: "responses", sideBody, session, log });
                 if (outcome.kind === "yes") {
                     const span = resolveDecisionRange(outcome, ranges);

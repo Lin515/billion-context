@@ -6,7 +6,14 @@
 // strict answer parsing, live-range validation, the failure ladder, and
 // per-protocol answer extraction. The wire call itself lives in server.ts
 // (runNudgeDecision) so it can reuse the main request's forward target —
-// cache-mark parity with the stable prefix is what keeps the call cheap.
+// cache-mark parity with the stable prefix is what keeps the call cheap. A
+// JSON yes/no needs no extended thinking: when the client sent a
+// thinking/reasoning knob the decision call reduces it (anthropic
+// `thinking:{type:"disabled"}`, openai-chat `reasoning_effort:"minimal"` /
+// `reasoning:{effort:"minimal"}`, responses `reasoning:{effort:"low"}`,
+// google `generationConfig.thinkingConfig.thinkingBudget:0`) — otherwise the
+// model would burn the tiny output budget on reasoning before answering.
+// Wire-fidelity: a key the client never sent is never added.
 //
 // Failure semantics (owner-approved ladder): a hard failure (timeout / HTTP
 // error / unparseable answer) vetoes THIS round only ("never force-compress
