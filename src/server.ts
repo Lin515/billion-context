@@ -78,7 +78,8 @@ import { applyRanges } from "./stream.js";
 import { attachSubagentSessions } from "./subagent-sessions.js";
 import { buildSessionCacheReport, credentialFingerprint, handleAcpCache, learnedImageReserve, noteClientAbort, noteForwardedBody, noteForwardedImageFacts, readKeySwitchStats, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
 import { warnCacheCollapse } from "./cache-warn.js";
-import { extractBillingAttributionBlock, preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
+import { extractBillingAttributionBlock, extractSummaryFromSse, preflightCompress, estimateCoreMessages, estimateCoreMessagesUpper, estimateRawBodyTokens, type PreflightResult } from "./preflight.js";
+import { buildDecisionPrompt, buildDirectiveText, consumeFallback, DEFAULT_DECIDE_MAX_TOKENS, DECIDE_TIMEOUT_MS, extractDecisionText, ladderMode, parseDecision, recordDecision, resolveDecisionRange, type DecideConfig, type DecisionOutcome } from "./nudge-decide.js";
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { countImagesInParsedBody, countImagesInRawBody, imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, upstreamHost, type ResolvedImageBilling } from "./image-tokens.js";
 import { APIG_RESIGN_HEADER, APIG_RESIGN_CREDENTIAL_HEADER, APIG_RESIGN_SCHEME, KNOWN_SIGNATURE_SCHEMES, clearSignedRefusal, decodeApigCredential, inboundSignedScheme, readPendingRefusals, recordSignedRefusal, resignApig, signedRefusal, unresolvedRefusals } from "./apig-resign.js";
@@ -3185,6 +3186,12 @@ async function handle(
             ): Promise<{ body: string | Buffer; prepared: Prepared | null } | null> => {
                 const runPrepare = async (): Promise<Prepared> => {
                     const cs = resolveCompress(opts.routes, route?.rewrittenUrl, requestModel, opts.compress);
+                    // #2228: model-decided nudge timing — resolved through the standard
+                    // three-level compress cascade; presence of the object enables the
+                    // side-call decision path at tier-1 arms (off unless explicitly set).
+                    const decide = cs.nudgeModelDecided === true
+                        ? { maxTokens: typeof cs.nudgeDecisionMaxTokens === "number" && cs.nudgeDecisionMaxTokens > 0 ? Math.floor(cs.nudgeDecisionMaxTokens) : DEFAULT_DECIDE_MAX_TOKENS }
+                        : undefined;
                     // #1279: stamp this request's effective cache-economics price
                     // profile on the session so request-context-free report faces
                     // (acp_cache / /acp-cache / __bili/cache-report) price folds
@@ -3220,19 +3227,19 @@ async function handle(
                         // Both the model and the stream flag live in the URL path
                         // for this wire (the body carries neither), so they are
                         // derived here instead of read off `work`.
-                        return await prepareGoogle(work as GoogleRequestBody, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, nativeWindow, googleModel, googlePathKind(urlPath) === "stream-generate", visibilityMarkers, upstreamOrigin);
+                        return await prepareGoogle(work as GoogleRequestBody, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, nativeWindow, googleModel, googlePathKind(urlPath) === "stream-generate", visibilityMarkers, upstreamOrigin, req, decide);
                     }
                     return protocol === "anthropic"
-                        ? await prepareAnthropic(work as AnthropicRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, upstreamOrigin, reasoningCfg, visibilityMarkers)
+                        ? await prepareAnthropic(work as AnthropicRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, upstreamOrigin, reasoningCfg, visibilityMarkers, decide)
                         : protocol === "openai"
-                          ? await prepareOpenai(work as OpenAIRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, upstreamOrigin, nativeWindow, reasoningCfg, visibilityMarkers, route?.rewrittenUrl)
+                          ? await prepareOpenai(work as OpenAIRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, pluginMode, upstreamOrigin, nativeWindow, reasoningCfg, visibilityMarkers, route?.rewrittenUrl, decide)
                           : responsesCompact
                             // #618 review nit: when no bili compaction item is present,
                             // prepareResponsesCompact falls back to the raw bodyBuffer — forward
                             // the re-serialized post-strip work instead so dropped images don't
                             // ride along. Unchanged bodies keep the original buffer byte-identical.
                             ? prepareResponsesCompact(stripped.removed > 0 ? Buffer.from(JSON.stringify(work)) : bodyBuffer, work as ResponsesRequestBody, session, req, core, reqConfig, log)
-                            : await prepareResponses(work as ResponsesRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, responsesIdentity!, pluginMode, upstreamOrigin, nativeWindow, reasoningCfg, visibilityMarkers, route?.rewrittenUrl);
+                            : await prepareResponses(work as ResponsesRequestBody, req, opts, core, reqConfig, reqPrompts, reqSurface, log, session, responsesIdentity!, pluginMode, upstreamOrigin, nativeWindow, reasoningCfg, visibilityMarkers, route?.rewrittenUrl, decide);
                 };
                 // #332: codex's native remote-compaction request (trigger form)
                 // is dispatched BEFORE prepare/preflight. When it is not
@@ -3960,6 +3967,7 @@ async function prepareAnthropic(
     upstreamOrigin: string,
     reasoning: CompressReasoningConfig | undefined,
     visibilityMarkers: boolean,
+    decide?: DecideConfig,
 ): Promise<Prepared> {
     const sessionId = session.id;
     const stream = parsed.stream === true;
@@ -4172,12 +4180,43 @@ async function prepareAnthropic(
         // hard limit. Ephemeral user message: not persisted, never enters the
         // agent's re-sent history, safe for the prefix-cache anchor.
         if (willInjectNudge && turn.nudge) {
-            try {
-                const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
-                if (rendered.text) {
-                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+            // #2228: model-decided timing. Only gentle/over-limit T1 arms ask
+            // the model (a cheap side call over the session's cached prefix)
+            // whether compressing NOW serves the current task; a strict-JSON
+            // yes injects an explicit directive with a program-finalized span,
+            // anything else injects nothing this round. EMERGENCY arms and
+            // tier>=2 distillation keep the legacy advisory below.
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            if (useDecide && ladderMode(session.metadata) === "fallback") {
+                consumeFallback(session.metadata);
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    }
+                } catch {
                 }
-            } catch {
+            } else if (useDecide) {
+                const ranges = turn.nudge.compressibleRanges ?? [];
+                const sideBody: Record<string, unknown> = { ...parsed, messages: [...rebuiltMessages, { role: "user", content: buildDecisionPrompt(ranges) }], system: systemOut, tools: toolsOut, stream: false, max_tokens: decide.maxTokens };
+                delete sideBody.prompt_cache_key;
+                const outcome = await runNudgeDecision({ req, opts, protocol: "anthropic", sideBody, session, log });
+                if (outcome.kind === "yes") {
+                    const span = resolveDecisionRange(outcome, ranges);
+                    if (span) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(buildDirectiveText(span.startRef, span.endRef, outcome.topic))), visibilityMarkers) }];
+                    } else {
+                        log("info", `[${sessionId}] [acp-decide] yes but no live range left to target — skipping injection`);
+                    }
+                }
+            } else {
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    }
+                } catch {
+                }
             }
         }
         // [#1095] restore-channel guidance — ephemeral trailing user message
@@ -4248,6 +4287,7 @@ async function prepareOpenai(
     reasoning: CompressReasoningConfig | undefined,
     visibilityMarkers: boolean,
     billingUpstream?: string,
+    decide?: DecideConfig,
 ): Promise<Prepared> {
     const sessionId = session.id;
     const stream = parsed.stream === true;
@@ -4421,12 +4461,44 @@ async function prepareOpenai(
         // message — not persisted, never enters the agent's re-sent history,
         // prefix-cache-anchor safe.
         if (willInjectNudge && turn.nudge) {
-            try {
-                const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
-                if (rendered.text) {
-                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+            // #2228: model-decided timing (see prepareAnthropic for the policy):
+            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
+            // tier>=2 keep the legacy advisory.
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            if (useDecide && ladderMode(session.metadata) === "fallback") {
+                consumeFallback(session.metadata);
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    }
+                } catch {
                 }
-            } catch {
+            } else if (useDecide) {
+                const ranges = turn.nudge.compressibleRanges ?? [];
+                // Mirror the post-try strict-echo repair on the stable prefix so
+                // the side call's bytes match the main request's cache line.
+                const stable = normalizeStrictEchoReasoning([...rebuiltMessages], isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
+                const sideBody: Record<string, unknown> = { ...parsed, messages: [...stable, { role: "user", content: buildDecisionPrompt(ranges) }], tools: toolsOut as OpenAITool[] | undefined, stream: false };
+                sideBody[typeof (parsed as Record<string, unknown>).max_completion_tokens === "number" ? "max_completion_tokens" : "max_tokens"] = decide.maxTokens;
+                delete sideBody.prompt_cache_retention;
+                const outcome = await runNudgeDecision({ req, opts, protocol: "openai", sideBody, session, log });
+                if (outcome.kind === "yes") {
+                    const span = resolveDecisionRange(outcome, ranges);
+                    if (span) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(buildDirectiveText(span.startRef, span.endRef, outcome.topic))), visibilityMarkers) }];
+                    } else {
+                        log("info", `[${sessionId}] [acp-decide] yes but no live range left to target — skipping injection`);
+                    }
+                }
+            } else {
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    }
+                } catch {
+                }
             }
         }
         // [#1095] restore-channel guidance — ephemeral trailing user message
@@ -4549,6 +4621,8 @@ async function prepareGoogle(
     stream: boolean,
     visibilityMarkers: boolean,
     upstreamOrigin: string,
+    req: http.IncomingMessage,
+    decide?: DecideConfig,
 ): Promise<Prepared> {
     const sessionId = session.id;
     ++session.stats.requests;
@@ -4672,12 +4746,39 @@ async function prepareGoogle(
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
         }
         if (willInjectNudge && turn.nudge) {
-            try {
-                const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
-                if (rendered.text) {
-                    rebuiltContents = appendGoogleNudge(rebuiltContents, withMarkerIntegrityNote(withStagedCompressGuidance(rendered.text), visibilityMarkers));
+            // #2228: model-decided timing (see prepareAnthropic for the policy):
+            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
+            // tier>=2 keep the legacy advisory.
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            if (useDecide && ladderMode(session.metadata) === "fallback") {
+                consumeFallback(session.metadata);
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltContents = appendGoogleNudge(rebuiltContents, withMarkerIntegrityNote(withStagedCompressGuidance(rendered.text), visibilityMarkers));
+                    }
+                } catch {
                 }
-            } catch {
+            } else if (useDecide) {
+                const ranges = turn.nudge.compressibleRanges ?? [];
+                const sideBody: Record<string, unknown> = { ...parsed, contents: [...rebuiltContents, { role: "user", parts: [{ text: buildDecisionPrompt(ranges) }] }], tools: toolsOut, systemInstruction, generationConfig: { ...(parsed.generationConfig ?? {}), maxOutputTokens: decide.maxTokens } };
+                const outcome = await runNudgeDecision({ req, opts, protocol: "google", sideBody, session, log });
+                if (outcome.kind === "yes") {
+                    const span = resolveDecisionRange(outcome, ranges);
+                    if (span) {
+                        rebuiltContents = appendGoogleNudge(rebuiltContents, withMarkerIntegrityNote(withStagedCompressGuidance(buildDirectiveText(span.startRef, span.endRef, outcome.topic)), visibilityMarkers));
+                    } else {
+                        log("info", `[${sessionId}] [acp-decide] yes but no live range left to target — skipping injection`);
+                    }
+                }
+            } else {
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        rebuiltContents = appendGoogleNudge(rebuiltContents, withMarkerIntegrityNote(withStagedCompressGuidance(rendered.text), visibilityMarkers));
+                    }
+                } catch {
+                }
             }
         }
         // [#1095] restore-channel guidance — ephemeral trailing note (see prepareAnthropic).
@@ -4759,6 +4860,7 @@ async function prepareResponses(
     reasoning: CompressReasoningConfig | undefined,
     visibilityMarkers: boolean,
     billingUpstream?: string,
+    decide?: DecideConfig,
 ): Promise<Prepared> {
     const sessionId = session.id;
     const stream = parsed.stream === true;
@@ -5000,17 +5102,59 @@ async function prepareResponses(
         // trigger (preflight alone fires only at the hard limit). Ephemeral user
         // message — not persisted, prefix-cache-anchor safe.
         if (willInjectNudge && turn.nudge) {
-            try {
-                const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
-                if (rendered.text) {
-                    const inputItems: ResponseInputItem[] = typeof rebuiltInput === "string"
-                        ? [{ type: "message", role: "user", content: rebuiltInput }]
-                        : rebuiltInput;
-                    inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
-                    rebuiltInput = inputItems;
-                    log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
+            // #2228: model-decided timing (see prepareAnthropic for the policy):
+            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
+            // tier>=2 keep the legacy advisory.
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            if (useDecide && ladderMode(session.metadata) === "fallback") {
+                consumeFallback(session.metadata);
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        const inputItems: ResponseInputItem[] = typeof rebuiltInput === "string"
+                            ? [{ type: "message", role: "user", content: rebuiltInput }]
+                            : rebuiltInput;
+                        inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
+                        rebuiltInput = inputItems;
+                        log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
+                    }
+                } catch {
                 }
-            } catch {
+            } else if (useDecide) {
+                const ranges = turn.nudge.compressibleRanges ?? [];
+                // Mirror the post-try strict-echo repair on the stable prefix so
+                // the side call's bytes match the main request's cache line.
+                const stableItems: ResponseInputItem[] = typeof rebuiltInput === "string"
+                    ? [{ type: "message", role: "user", content: rebuiltInput }]
+                    : normalizeStrictEchoResponsesInput([...rebuiltInput], isStrictReasoningEcho(session, upstreamOrigin, modelIdOf(parsed)), log, sessionId);
+                const sideBody: Record<string, unknown> = { ...parsed, input: [...stableItems, { type: "message", role: "user", content: buildDecisionPrompt(ranges) }], tools: toolsOut, stream: false, max_output_tokens: decide.maxTokens };
+                const outcome = await runNudgeDecision({ req, opts, protocol: "responses", sideBody, session, log });
+                if (outcome.kind === "yes") {
+                    const span = resolveDecisionRange(outcome, ranges);
+                    if (span) {
+                        const inputItems: ResponseInputItem[] = typeof rebuiltInput === "string"
+                            ? [{ type: "message", role: "user", content: rebuiltInput }]
+                            : [...stableItems];
+                        inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(buildDirectiveText(span.startRef, span.endRef, outcome.topic))), visibilityMarkers) });
+                        rebuiltInput = inputItems;
+                        log("debug", `[${sessionId}] [inject] compress directive appended as trailing user turn`);
+                    } else {
+                        log("info", `[${sessionId}] [acp-decide] yes but no live range left to target — skipping injection`);
+                    }
+                }
+            } else {
+                try {
+                    const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
+                    if (rendered.text) {
+                        const inputItems: ResponseInputItem[] = typeof rebuiltInput === "string"
+                            ? [{ type: "message", role: "user", content: rebuiltInput }]
+                            : rebuiltInput;
+                        inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
+                        rebuiltInput = inputItems;
+                        log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
+                    }
+                } catch {
+                }
             }
         }
         // [#1095] restore-channel guidance — ephemeral trailing note (see
@@ -5589,6 +5733,75 @@ function buildForwardTarget(
     const decision = resolveProxyDecision(opts.routes, opts.proxy, route?.rewrittenUrl ?? upstreamUrl, opts.proxyFallback);
     logUpstreamProxyDecision(opts, upstreamUrl, decision);
     return { upstreamUrl, headers, proxyUrl: decision.proxy };
+}
+
+// #2228: model-decided nudge timing — the side-channel decision call. It
+// reuses the main request's forward target (same URL/headers/proxy/resign
+// arm) so the session's stable prefix lands on the SAME cache line as the
+// main turn; only the tail differs (one neutral question, small output
+// budget). The answer never enters any history — it only decides whether the
+// main request gets a directive or nothing. Timeout-bounded (no client abort
+// handle exists at prepare time): a hung decision degrades to "inject
+// nothing this round", and repeated hard failures fall back to the legacy
+// advisory nudge via the ladder in nudge-decide.ts.
+async function runNudgeDecision(args: {
+    req: http.IncomingMessage;
+    opts: ProxyOptions;
+    protocol: "anthropic" | "openai" | "google" | "responses";
+    sideBody: Record<string, unknown>;
+    session: Session;
+    log: (level: string, msg: string) => void;
+}): Promise<DecisionOutcome> {
+    const { req, opts, protocol, sideBody, session, log } = args;
+    let outcome: DecisionOutcome;
+    try {
+        const route = resolveUpstream(opts, req.url ?? "", req);
+        const target = buildForwardTarget(req, opts, route);
+        let url = target.upstreamUrl;
+        if (protocol === "google" && url.includes(":streamGenerateContent")) {
+            url = url.replace(":streamGenerateContent", ":generateContent");
+        }
+        const bodyStr = JSON.stringify(sideBody);
+        const headers: Record<string, string> = { "content-type": "application/json", ...target.headers };
+        const fwdResign = resignSettingsFor(opts, target.upstreamUrl);
+        const resignCtx =
+            fwdResign.enabled && String(Array.isArray(req.headers[APIG_RESIGN_HEADER]) ? req.headers[APIG_RESIGN_HEADER][0] ?? "" : req.headers[APIG_RESIGN_HEADER] ?? "") === APIG_RESIGN_SCHEME
+                ? decodeApigCredential(Array.isArray(req.headers[APIG_RESIGN_CREDENTIAL_HEADER]) ? req.headers[APIG_RESIGN_CREDENTIAL_HEADER][0] : req.headers[APIG_RESIGN_CREDENTIAL_HEADER])
+                : undefined;
+        if (resignCtx !== undefined) {
+            try {
+                resignApig(headers, resignCtx, "POST", target.upstreamUrl, bodyStr, findRoute(opts.routes, target.upstreamUrl));
+            } catch (err) {
+                log("warn", `[acp-decide] session=${session.id} re-sign failed; sending the previous signature: ${String(err)}`);
+            }
+        }
+        const { response, clearTimer } = await fetchWithTimeout(url, { method: "POST", headers, body: bodyStr, dispatcher: proxyDispatcher(target.proxyUrl) }, DECIDE_TIMEOUT_MS);
+        try {
+            if (!response.ok) {
+                outcome = { kind: "failed", detail: `HTTP ${response.status}` };
+            } else {
+                const text = await response.text();
+                let json: Record<string, unknown> | null = null;
+                try {
+                    json = JSON.parse(text) as Record<string, unknown>;
+                } catch {
+                    json = null;
+                }
+                outcome = parseDecision(json !== null ? extractDecisionText(protocol, json) : extractSummaryFromSse(protocol, text));
+            }
+        } finally {
+            clearTimer();
+        }
+    } catch (e) {
+        outcome = { kind: "failed", detail: String(e) };
+    }
+    recordDecision(session.metadata, outcome.kind !== "failed");
+    markDirty(session);
+    log(
+        outcome.kind === "failed" ? "warn" : "info",
+        `[acp-decide] session=${session.id} ${protocol}: ${outcome.kind === "failed" ? outcome.detail : outcome.kind === "yes" ? `yes${outcome.range ? ` (${outcome.range})` : ""}` : "no"}`,
+    );
+    return outcome;
 }
 
 // #247: context exceeds the (new) model's window — usually right after a

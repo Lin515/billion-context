@@ -74,6 +74,8 @@ export function mergeCompress(
         maxContextLimit: pick("maxContextLimit"),
         emergencyThresholdPercent: pick("emergencyThresholdPercent"),
         nudgeGrowthTokens: pick("nudgeGrowthTokens"),
+        nudgeModelDecided: pick("nudgeModelDecided"),
+        nudgeDecisionMaxTokens: pick("nudgeDecisionMaxTokens"),
         preserveRecentMessages: pick("preserveRecentMessages"),
         preserveRecentTokens: pick("preserveRecentTokens"),
         minCompressRangeChars: rangeOf(model) ?? rangeOf(provider) ?? rangeOf(global),

@@ -169,6 +169,21 @@ export type CompressSettings = {
      *  adaptive band to a fixed step (sets both `nudge.growthFloor` and
      *  `nudge.growthCap`). */
     nudgeGrowthTokens?: number;
+    /** #2228: model-decided nudge timing. When true, an armed tier-1 (gentle)
+     *  nudge first asks the model — over the session's already-cached prefix,
+     *  in a short side call with no tools tail — whether compressing NOW is
+     *  net-beneficial for the current task. A strict-JSON "yes" (optionally
+     *  naming a span) injects an explicit directive with a program-finalized
+     *  range; "no", a malformed answer, or a timeout injects nothing this
+     *  round. After 3 consecutive hard failures the next arm falls back to
+     *  the legacy advisory nudge once and resets (self-healing). Emergency /
+     *  over-limit nudges and tier-2/3 distillation bypass the decision
+     *  entirely. Host-only (not passed to the kernel); off unless explicitly
+     *  enabled at some level. */
+    nudgeModelDecided?: boolean;
+    /** #2228: output budget (tokens) of the decision side call. Default 200
+     *  (same ceiling class as SIDE_REQUEST_MAX_TOKENS). Must be > 0. */
+    nudgeDecisionMaxTokens?: number;
     /** Trailing messages never offered for compression
      *  (kernel `preserveRecentMessages`). */
     preserveRecentMessages?: number;
@@ -1593,7 +1608,8 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
 // level down under "compress". Keep in sync with parseCompressSettings.
 const COMPRESS_SETTING_FIELDS = new Set([
     "modelContextLimit", "maxContextLimit", "emergencyThresholdPercent",
-    "nudgeGrowthTokens", "preserveRecentMessages", "preserveRecentTokens",
+    "nudgeGrowthTokens", "nudgeModelDecided", "nudgeDecisionMaxTokens",
+    "preserveRecentMessages", "preserveRecentTokens",
     "minCompressRange", "minCompressRangeChars", "stripImagesKeepRecent",
     "outputHeadroomMaxPct", "tiers", "protectedLatestTools", "protectedTools",
     "neverPreserveRecentTools", "preserveRecentTools", "stripImages",
@@ -1977,6 +1993,16 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
     for (const key of ["nudgeGrowthTokens", "preserveRecentMessages", "preserveRecentTokens", "minCompressRange", "minCompressRangeChars", "stripImagesKeepRecent"] as const) {
         takeNumber(key);
     }
+    // #2228: the decision side-call budget must be positive — 0/negative would
+    // starve the call, so validate stricter than takeNumber.
+    if ("nudgeDecisionMaxTokens" in obj) {
+        const v = obj.nudgeDecisionMaxTokens;
+        if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+            ok = false;
+        } else {
+            out.nudgeDecisionMaxTokens = Math.floor(v);
+        }
+    }
     if ("outputHeadroomMaxPct" in obj) {
         const v = obj.outputHeadroomMaxPct;
         if (typeof v !== "number" && typeof v !== "string") ok = false;
@@ -1989,6 +2015,10 @@ export function parseCompressSettings(v: unknown): (CompressSettings & { injectT
     if ("tiers" in obj) {
         if (typeof obj.tiers !== "boolean") ok = false;
         else out.tiers = obj.tiers;
+    }
+    if ("nudgeModelDecided" in obj) {
+        if (typeof obj.nudgeModelDecided !== "boolean") ok = false;
+        else out.nudgeModelDecided = obj.nudgeModelDecided;
     }
     for (const key of ["protectedLatestTools", "protectedTools"] as const) {
         if (!(key in obj) || obj[key] === undefined) continue;
