@@ -200,7 +200,7 @@
 | `compress.emergencyThresholdPercent` | number \| % | "95%" | — | 历史超过窗口该占比时对超大工具输出做紧急截断（必须 >= maxContextLimit）。 |
 | `compress.outputHeadroomMaxPct` | number \| % | 0.25 | — | max_tokens 输出预留占窗口的最大比例。 |
 | `compress.nudgeGrowthTokens` | number | 50000 (kernel flat cadence) | — | 增长门槛：可折叠片段超出基线增长达到该 token 数才发提醒（按设计恒定，与窗口大小无关）。 |
-| `compress.nudgeModelDecided` | boolean | off (unset) | — | 模型自决的压缩时机（#2228）：tier-1 提醒触发时，先通过一次走会话缓存前缀的短 side call 问模型——以当前任务为前提，现在压缩是否划算。严格 JSON 的 "yes" 会注入带程序最终确定范围的明确压缩指令；"no"、格式错误或超时则本轮不注入任何内容。EMERGENCY 档与 tier≥2 蒸馏始终保留原有 advisory。默认关闭，需显式开启。 |
+| `compress.nudgeModelDecided` | boolean | off (unset) | — | 模型自决的压缩时机（#2228）：**温和增长的 tier-1** 提醒触发时，先通过一次走会话缓存前缀的短 side call 问模型——以当前任务为前提，现在压缩是否划算。严格 JSON 的 "yes" 会注入带程序最终确定范围的明确压缩指令；"no"、格式错误或超时则本轮不注入任何内容。OVER-LIMIT / EMERGENCY 压力档与 tier≥2 蒸馏从不询问——直接保留原有 advisory。默认关闭，需显式开启。 |
 | `compress.nudgeDecisionMaxTokens` | number | 200 | — | `nudgeModelDecided` 所用模型决策 side call 的输出预算（token）。必须 > 0。 |
 | `compress.streamSummary` | boolean | false (unset) | — | 强制 preflight 摘要从首次尝试起就走流式（SSE）请求。适用于上游位于会掐断长非流式补全的网关之后（如 Cloudflare HTTP 524）：错误驱动的自学习只认 400 "stream required"，网关超时永远无法触发。 |
 | `compress.preserveRecentMessages` | number | kernel ≈5 | — | 最近的消息软保护、免于折叠。 |
@@ -1100,7 +1100,7 @@
 - **类型：** `boolean`
 - **默认值：** *（关闭，除非显式设置）*
 - **状态：** ACTIVE (#2228)
-- **说明：** 模型自决的压缩时机。开启后，**tier-1**（温和增长或超阈值）提醒触发时不再立即注入 advisory 文本，而是先发一次短 **side call**：复用会话已缓存的前缀（同样的 system/tools/messages 前缀、极小输出预算、15 秒空闲超时），让模型以当前任务为前提判断"现在压缩是否净收益为正"，并可给出建议折叠范围与简短主题。回答必须是严格 JSON（`{"compress": true|false, "range": "mNNNNN-mNNNNN"?, "topic": "?"}`），其余任何输出都按失败处理。有效的 "yes" 会注入一条明确的压缩指令并带程序最终确定的范围——建议范围只有完整落在某个存活可压缩范围内才被采纳，否则取最大的存活范围；"no"、格式错误或超时则本轮不注入任何东西。**连续 3 次硬失败**后，下一次 arm 回退到原有 advisory 一次并把计数清零（自愈阶梯）。**EMERGENCY** 档与 **tier-2/3 蒸馏**永远不经过决策，逐字保留原有 advisory。该字段仅宿主侧使用——不传入内核。默认关闭。
+- **说明：** 模型自决的压缩时机。开启后，**温和增长的 tier-1** 提醒触发时不再立即注入 advisory 文本，而是先发一次短 **side call**：复用会话已缓存的前缀（同样的 system/tools/messages 前缀、极小输出预算、15 秒空闲超时），让模型以当前任务为前提判断"现在压缩是否净收益为正"，并可给出建议折叠范围与简短主题。回答必须是严格 JSON（`{"compress": true|false, "range": "mNNNNN-mNNNNN"?, "topic": "?"}`），其余任何输出都按失败处理。有效的 "yes" 会注入一条明确的压缩指令并带程序最终确定的范围——建议范围只有完整落在某个存活可压缩范围内才被采纳，否则取最大的存活范围；"no"、格式错误或超时则本轮不注入任何东西。**连续 3 次硬失败**后，下一次 arm 回退到原有 advisory 一次并把计数清零（自愈阶梯）。**OVER-LIMIT / EMERGENCY 压力档与 tier-2/3 蒸馏永远不经过决策**——那种压力下模型没有否决权，advisory 直接注入（owner 裁定）。该字段仅宿主侧使用——不传入内核。默认关闭。
 
 #### `nudgeDecisionMaxTokens`
 

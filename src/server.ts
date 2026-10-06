@@ -4180,13 +4180,15 @@ async function prepareAnthropic(
         // hard limit. Ephemeral user message: not persisted, never enters the
         // agent's re-sent history, safe for the prefix-cache anchor.
         if (willInjectNudge && turn.nudge) {
-            // #2228: model-decided timing. Only gentle/over-limit T1 arms ask
-            // the model (a cheap side call over the session's cached prefix)
+            // #2228: model-decided timing. Only GENTLE-GROWTH T1 arms ask the
+            // model (a cheap side call over the session's cached prefix)
             // whether compressing NOW serves the current task; a strict-JSON
             // yes injects an explicit directive with a program-finalized span,
-            // anything else injects nothing this round. EMERGENCY arms and
-            // tier>=2 distillation keep the legacy advisory below.
-            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            // anything else injects nothing this round. OVER-LIMIT and EMERGENCY
+            // arms bypass the decision outright (owner ruling: at that pressure
+            // the model holds NO veto — the advisory goes straight in), and so
+            // does tier>=2 distillation.
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.overLimit !== 1 && turn.nudge.breakdown.emergencyOverride !== 1;
             if (useDecide && ladderMode(session.metadata) === "fallback") {
                 consumeFallback(session.metadata);
                 try {
@@ -4461,10 +4463,10 @@ async function prepareOpenai(
         // message — not persisted, never enters the agent's re-sent history,
         // prefix-cache-anchor safe.
         if (willInjectNudge && turn.nudge) {
-            // #2228: model-decided timing (see prepareAnthropic for the policy):
-            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
-            // tier>=2 keep the legacy advisory.
-            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            // #2228: model-decided timing — GENTLE-GROWTH T1 arms only; see
+            // prepareAnthropic for the full policy (OVER-LIMIT / EMERGENCY /
+            // tier>=2 keep the legacy advisory below).
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.overLimit !== 1 && turn.nudge.breakdown.emergencyOverride !== 1;
             if (useDecide && ladderMode(session.metadata) === "fallback") {
                 consumeFallback(session.metadata);
                 try {
@@ -4746,10 +4748,10 @@ async function prepareGoogle(
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
         }
         if (willInjectNudge && turn.nudge) {
-            // #2228: model-decided timing (see prepareAnthropic for the policy):
-            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
-            // tier>=2 keep the legacy advisory.
-            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            // #2228: model-decided timing — GENTLE-GROWTH T1 arms only; see
+            // prepareAnthropic for the full policy (OVER-LIMIT / EMERGENCY /
+            // tier>=2 keep the legacy advisory below).
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.overLimit !== 1 && turn.nudge.breakdown.emergencyOverride !== 1;
             if (useDecide && ladderMode(session.metadata) === "fallback") {
                 consumeFallback(session.metadata);
                 try {
@@ -5102,10 +5104,10 @@ async function prepareResponses(
         // trigger (preflight alone fires only at the hard limit). Ephemeral user
         // message — not persisted, prefix-cache-anchor safe.
         if (willInjectNudge && turn.nudge) {
-            // #2228: model-decided timing (see prepareAnthropic for the policy):
-            // gentle/over-limit T1 arms ask the model first; EMERGENCY and
-            // tier>=2 keep the legacy advisory.
-            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.emergencyOverride !== 1;
+            // #2228: model-decided timing — GENTLE-GROWTH T1 arms only; see
+            // prepareAnthropic for the full policy (OVER-LIMIT / EMERGENCY /
+            // tier>=2 keep the legacy advisory below).
+            const useDecide = decide !== undefined && turn.nudge.tier === 1 && turn.nudge.breakdown.overLimit !== 1 && turn.nudge.breakdown.emergencyOverride !== 1;
             if (useDecide && ladderMode(session.metadata) === "fallback") {
                 consumeFallback(session.metadata);
                 try {

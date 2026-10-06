@@ -14,9 +14,10 @@
 // DECIDE_FALLBACK_THRESHOLD consecutive failures the NEXT arm skips the
 // decision entirely and injects the legacy advisory nudge once, then resets —
 // self-healing if the provider or model recovers. A parsed "no" is the model
-// exercising its veto: it resets the counter and never falls back (the
-// emergency/over-limit path bypasses the decision outright and stays the
-// last-line backstop against compression starvation).
+// exercising its veto: it resets the counter and never falls back. OVER-LIMIT
+// and EMERGENCY pressure arms bypass the decision outright (owner ruling: at
+// that pressure the model holds no veto — the advisory goes straight in); they
+// stay the last-line backstop against compression starvation.
 
 import type { CompressibleRange } from "acp-kernel";
 
