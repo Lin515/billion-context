@@ -163,7 +163,22 @@ export function normalizeMessageText(text: string | undefined): string {
         .trim();
 }
 
+/** #2334: full-text normalized-identity computations performed by this module
+ *  (anchor seeding/rebuild + churn-region candidate norms). A measurement seam
+ *  for the work-count pins in tests/fold-reconcile.test.ts — the over-cap
+ *  defect paid O(overflow) normalizations per steady-state pass while returning
+ *  byte-identical results, so wall-clock thresholds alone cannot prove the work
+ *  is gone. */
+let normalizedIdentityWork = 0;
+export function resetNormalizedIdentityWork(): void {
+    normalizedIdentityWork = 0;
+}
+export function normalizedIdentityWorkCount(): number {
+    return normalizedIdentityWork;
+}
+
 export function normalizedIdentity(message: CoreMessage): string {
+    normalizedIdentityWork++;
     const h = createHash("sha256");
     h.update(`${message.role}\u0000${message.contentType}\u0000${message.toolName ?? ""}\u0000${message.toolCallId ?? ""}\u0000${normalizeMessageText(message.text)}`);
     return h.digest("hex").slice(0, 16);
@@ -230,13 +245,16 @@ export function planReconciliation(
     // Candidates: inbound messages inside the churn region whose id is not
     // already covered (covered-present ids are exact matches of other old ids
     // and must not be claimed twice).
-    const candidates: { id: string; message: CoreMessage; norm: string }[] = [];
+    // #2334: norms are computed LAZILY — pass 1 (toolCallId) never needs them,
+    // so a fully tool-claimable churn region pays zero normalizations; pass 2
+    // computes each norm once, only for the candidates pass 1 left behind.
+    const candidates: { id: string; message: CoreMessage; norm?: string }[] = [];
     for (let i = prefix; i < newOrder.length - suffix; i++) {
         const id = newOrder[i];
         if (covered.has(id)) continue;
         const message = byId.get(id);
         if (message === undefined) continue;
-        candidates.push({ id, message, norm: normalizedIdentity(message) });
+        candidates.push({ id, message });
     }
     const claimedCandidates = new Set<string>();
 
@@ -282,8 +300,9 @@ export function planReconciliation(
     const normGroups = new Map<string, { ids: string[]; anchors: FoldAnchor[] }>();
     for (const cand of candidates) {
         if (claimedCandidates.has(cand.id)) continue;
-        const g = normGroups.get(cand.norm);
-        if (g === undefined) normGroups.set(cand.norm, { ids: [cand.id], anchors: [] });
+        const norm = cand.norm ?? (cand.norm = normalizedIdentity(cand.message));
+        const g = normGroups.get(norm);
+        if (g === undefined) normGroups.set(norm, { ids: [cand.id], anchors: [] });
         else g.ids.push(cand.id);
     }
     for (const oldId of missingMiddle) {
@@ -380,11 +399,24 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
     const byId = new Map<string, CoreMessage>();
     for (const m of msgs) if (m.id !== undefined) byId.set(m.id, m);
     const nextAnchors: Record<string, FoldAnchor> = {};
+    let anchorCount = 0;
     for (const id of covered) {
+        // #2334: enforce the cap WHILE building. The old build-all-then-delete
+        // form computed a full normalization + sha256 for every covered id and
+        // discarded the overflow — and the discarded ids had no stored anchor
+        // to reuse, so EVERY subsequent pass recomputed and dropped them again
+        // (a 20k-id session paid 3616 wasted hashes per request). Breaking at
+        // the cap keeps exactly the old survivor set (first MAX_ANCHORS in
+        // covered order — the deletion loop removed precisely the tail) and the
+        // key order; ids past the cap still get no anchor, as before.
+        if (anchorCount >= MAX_ANCHORS) break;
         const claimed = plan.claims.get(id);
         if (claimed !== undefined) {
             const message = byId.get(claimed);
-            if (message !== undefined) nextAnchors[claimed] = anchorFrom(message);
+            if (message !== undefined) {
+                nextAnchors[claimed] = anchorFrom(message);
+                anchorCount++;
+            }
             continue;
         }
         // An unchanged id means unchanged bytes (kernel deriveMessageId hashes
@@ -393,14 +425,12 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
         // re-hashing the full text every pass (#1930-2: keeps steady-state
         // rounds near-free on 8K-message histories).
         const prior = anchors[id];
-        if (prior !== undefined) { nextAnchors[id] = prior; continue; }
+        if (prior !== undefined) { nextAnchors[id] = prior; anchorCount++; continue; }
         const message = byId.get(id);
-        if (message !== undefined) nextAnchors[id] = anchorFrom(message);
-    }
-    let anchorCount = 0;
-    for (const id of Object.keys(nextAnchors)) {
-        if (anchorCount >= MAX_ANCHORS) delete nextAnchors[id];
-        else anchorCount++;
+        if (message !== undefined) {
+            nextAnchors[id] = anchorFrom(message);
+            anchorCount++;
+        }
     }
     const nextOrder = msgs.map((m) => m.id).filter((id): id is string => id !== undefined).slice(-MAX_ORDER);
 

@@ -8,6 +8,8 @@ import {
     resolveFoldReconcileMode,
     noteSystemPromptFingerprint,
     METADATA_FOLD_COVERAGE,
+    resetNormalizedIdentityWork,
+    normalizedIdentityWorkCount,
     type FoldAnchor,
     type FoldBlockCoverage,
     type ReconcileOptions,
@@ -467,5 +469,114 @@ describe("reconcileFoldCoverage coverage evidence + side-request guard (#2202)",
         assert.equal(result.claims, 1);
         assert.equal(result.unmatched, 0);
         assert.equal(session.state.blocks[0].effectiveMessageIds[4], "k4-new");
+    });
+});
+
+describe("reconcileFoldCoverage anchor cap boundary (#2334)", () => {
+    // MAX_ANCHORS (src/fold-reconcile.ts) pinned at 16384 — hardcoded here on
+    // purpose so a constant move breaks the pin loudly instead of sliding it.
+    const CAP = 16_384;
+    function capSession(ids: string[]): Session {
+        return {
+            state: { blocks: [{ active: true, effectiveMessageIds: ids }] },
+            metadata: {},
+        } as unknown as Session;
+    }
+    const opts: ReconcileOptions = { mode: "repair", sessionId: "cap", log: () => {} };
+
+    test("steady-state resend beyond the cap pays zero normalizations and stays byte-stable", () => {
+        // The issue's minimal repro shape: 20000 distinct covered ids (> CAP).
+        // Pre-fix the second identical pass re-normalized + re-hashed exactly
+        // the 20000 − 16384 tail ids whose anchors were deleted on pass one.
+        const n = 20_000; // > CAP — the 8K perf history sits below the cap and cannot see this edge
+        const msgs = Array.from({ length: n }, (_, i) => msg(`x${i}`, "user", `covered payload ${i}`));
+        const session = capSession(msgs.map((m) => m.id!));
+
+        resetNormalizedIdentityWork();
+        const first = reconcileFoldCoverage(session, msgs, opts);
+        assert.equal(first.kind, "resend");
+        assert.equal(normalizedIdentityWorkCount(), CAP,
+            "cold fill stops at the cap — never pays for anchors that would be discarded");
+
+        const anchors = session.metadata.foldAnchors as Record<string, FoldAnchor>;
+        assert.equal(Object.keys(anchors).length, CAP, "anchor table capped");
+        assert.equal(Object.keys(anchors)[0], "x0", "survivors keep covered order (oldest first)");
+        assert.equal(Object.keys(anchors)[CAP - 1], `x${CAP - 1}`);
+        assert.equal(anchors[`x${CAP}`], undefined, "the overflow tail holds no anchor (pre-existing semantics)");
+        assert.deepEqual(anchors["x5"], {
+            n: normalizedIdentity(msgs[5]),
+            r: "user",
+            b: msgs[5].text!.length,
+        }, "retained anchor values keep the fresh anchorFrom shape");
+
+        const snapshot = JSON.stringify(session.metadata);
+        resetNormalizedIdentityWork();
+        const second = reconcileFoldCoverage(session, msgs, opts);
+        assert.deepEqual(second, { kind: "resend", missing: 0, claims: 0, byTool: 0, byNorm: 0, unmatched: 0 });
+        assert.equal(normalizedIdentityWorkCount(), 0,
+            "the overflow tail must not be normalized+hashed and dropped AGAIN every pass (#2334)");
+        assert.equal(JSON.stringify(session.metadata), snapshot, "steady-state resend leaves metadata byte-stable");
+    });
+
+    test("a fully tool-claimable churn pays no candidate norms (lazy normalization)", () => {
+        // Verbatim bookends + 8 churned middles carrying stable protocol
+        // toolCallIds: every claim resolves in the toolCallId pass, so the
+        // normalized-identity pass sees no unclaimed candidates. Expected work
+        // is exactly the 8 claim-anchor rebuilds (post-churn bytes must be
+        // anchored for the next churn) — pre-fix eager normalization paid 8
+        // extra candidate norms that were never compared.
+        const originals: CoreMessage[] = [msg("b0", "user", "bookend zero")];
+        const churned: CoreMessage[] = [msg("b0", "user", "bookend zero")];
+        for (let i = 1; i <= 8; i++) {
+            originals.push(msg(`t${i}`, "tool_result", `tool payload ${i} raw`, { toolCallId: `call-${i}`, toolName: "probe" }));
+            churned.push(msg(`t${i}-new`, "tool_result", `tool payload ${i}  re-encoded\r\n`, { toolCallId: `call-${i}`, toolName: "probe" }));
+        }
+        originals.push(msg("b9", "assistant", "bookend nine"));
+        churned.push(msg("b9", "assistant", "bookend nine"));
+        const session = capSession(originals.map((m) => m.id!));
+        reconcileFoldCoverage(session, originals, opts); // seed anchors + order backbone
+
+        resetNormalizedIdentityWork();
+        const result = reconcileFoldCoverage(session, churned, opts);
+        assert.equal(result.kind, "reanchored");
+        assert.equal(result.byTool, 8);
+        assert.equal(result.byNorm, 0);
+        assert.equal(result.unmatched, 0);
+        assert.equal(normalizedIdentityWorkCount(), 8,
+            "exactly the 8 claim-anchor rebuilds — zero wasted candidate norms");
+        assert.deepEqual(
+            (session.state.blocks[0] as { effectiveMessageIds: string[] }).effectiveMessageIds,
+            ["b0", ...Array.from({ length: 8 }, (_, i) => `t${i + 1}-new`), "b9"],
+        );
+    });
+
+    test("mixed churn normalizes only the tool-unclaimed candidates", () => {
+        // 4 toolCallId-churned + 4 plain-text-churned middles. Expected work:
+        // 8 claim-anchor rebuilds + 4 candidate norms for the plain messages
+        // the tool pass left behind. Pre-fix eager normalization paid all 8
+        // candidate norms up front — the 4 tool-claimed ones included.
+        const originals: CoreMessage[] = [msg("b0", "user", "bookend zero")];
+        const churned: CoreMessage[] = [msg("b0", "user", "bookend zero")];
+        for (let i = 1; i <= 4; i++) {
+            originals.push(msg(`t${i}`, "tool_result", `tool payload ${i} raw`, { toolCallId: `call-${i}`, toolName: "probe" }));
+            churned.push(msg(`t${i}-new`, "tool_result", `tool payload ${i}  re-encoded\r\n`, { toolCallId: `call-${i}`, toolName: "probe" }));
+        }
+        for (let i = 5; i <= 8; i++) {
+            originals.push(msg(`u${i}`, "user", `plain turn ${i}`));
+            churned.push(msg(`u${i}-new`, "user", `plain  turn ${i}\r\n`));
+        }
+        originals.push(msg("b9", "assistant", "bookend nine"));
+        churned.push(msg("b9", "assistant", "bookend nine"));
+        const session = capSession(originals.map((m) => m.id!));
+        reconcileFoldCoverage(session, originals, opts);
+
+        resetNormalizedIdentityWork();
+        const result = reconcileFoldCoverage(session, churned, opts);
+        assert.equal(result.kind, "reanchored");
+        assert.equal(result.byTool, 4);
+        assert.equal(result.byNorm, 4);
+        assert.equal(result.unmatched, 0);
+        assert.equal(normalizedIdentityWorkCount(), 12,
+            "8 claim-anchor rebuilds + 4 unclaimed-candidate norms, nothing else");
     });
 });
