@@ -40,7 +40,7 @@ const BILI_INJECTABLE_TOOL_NAMES = new Set([
     "image_full",
 ]);
 
-export type PiSubagentChildSignal = { present: false } | { present: true; agent?: string };
+type PiSubagentChildSignal = { present: false } | { present: true; agent?: string };
 
 /** Detect the pi-subagents child marker in the raw request body. The marker
  *  lives inside a JSON string value; `<`, letters, spaces and `=` are never
