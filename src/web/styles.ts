@@ -348,4 +348,21 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 .summary-creds h4 { margin: 0 0 8px; font-size: 13px; }
 .summary-actions label:has(input[type="password"]) { display: grid; gap: 5px; flex: 1 1 200px; min-width: 0; font-size: 12px; }
 .summary-actions .btn { min-height: 32px; }
+
+/* #2321: embeddable face (?embed=1) — framed inside a host settings page
+   (dsh). The host draws its own chrome and tab bar, so ours hides; tokens
+   flatten toward dsh-like values: transparent ground, translucent gray
+   borders, no shadow, 8px radius. Text colors keep following the scheme. */
+.embed .topbar { display: none; }
+.embed {
+    --shadow: none;
+    --radius: 8px;
+    --bg: transparent;
+    --bg-elev: rgba(127, 127, 127, 0.05);
+    --bg-muted: rgba(127, 127, 127, 0.09);
+    --border: rgba(127, 127, 127, 0.4);
+    --border-soft: rgba(127, 127, 127, 0.22);
+}
+.embed main { max-width: none; padding: 4px 0 12px; }
+.embed .banner { margin: 8px 0 0; }
 `;

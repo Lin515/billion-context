@@ -175,10 +175,14 @@ export async function handleAdminRoute(req: http.IncomingMessage, res: http.Serv
         return;
     }
     // Web config UI (served as HTML, separate from the JSON health check above).
-    if (req.method === "GET" && req.url === "/__bili/") {
+    // #2321: the bare path also tolerates a query (?embed=1&lang=…) — the dsh
+    // settings panel frames exactly this route. Every /__bili/ URL already
+    // passed the loopback/trusted-origin/tunnel gates above, so nothing opens.
+    if (req.method === "GET" && req.url !== undefined && (req.url === "/__bili/" || req.url.startsWith("/__bili/?"))) {
+        const u = new URL(req.url, "http://localhost");
         const origin = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}`;
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(renderUI(origin));
+        res.end(renderUI(origin, { embed: u.searchParams.get("embed") === "1" }));
         return;
     }
     if (req.method === "GET" && req.url === "/__bili/config") return handleConfigGet(res);

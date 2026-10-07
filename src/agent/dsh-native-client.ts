@@ -16,8 +16,16 @@
 // section therefore keeps polling the live route for the whole mount (fast
 // until the first resolution, slow after) and the entry follows wherever the
 // proxy actually listens — no reload or app restart. Neither source known ⇒
-// degrade to a hint instead of a dead link. The same panel is mounted at two
-// slots (#2125): settings.section
+// degrade to a hint instead of a dead link. #2321: once bound, the panel
+// embeds the REAL web UI — a native tab bar (overview/sessions/config/logs)
+// driving one iframe at origin/__bili/ with ?embed=1 plus a hash route; tab
+// switches move only the fragment, so the frame navigates same-document
+// (hashchange) without a full reload — and since its src tracks the polled
+// origin, a mid-session re-bind moves the frame in place too. The
+// open-in-browser button survives as the escape hatch. lang mirrors the host
+// locale: bind() resolves against the live dsh locale, and comparing the
+// resolved nav label with the registered zh value is the only locale signal
+// the client contract exposes. The same panel is mounted at two slots (#2125): settings.section
 // (always present — the launcher posture has no bundle page) and
 // plugins.bundle.config (keyed by package name; the plugin detail page renders
 // it only when this package is installed as a profile bundle and draws the
@@ -61,12 +69,30 @@ const POLL_INTERVAL_MS = 3000;
 const POLL_MAX_ATTEMPTS = 10;
 const SLOW_POLL_INTERVAL_MS = 10000;
 
+// #2321: pages offered by the embedded face, in tab-bar order. Labels mirror
+// the web UI's own nav terminology (src/web/i18n.ts) so each tab reads like
+// the title of the page inside the frame. "connect" stays out: it documents
+// how OTHER clients reach this proxy, which makes no sense from inside dsh.
+const PAGE_IDS = ["overview", "sessions", "config", "logs"] as const;
+type PageId = (typeof PAGE_IDS)[number];
+const PAGE_KEYS: Record<PageId, string> = {
+    overview: "tab_overview",
+    sessions: "tab_sessions",
+    config: "tab_config",
+    logs: "tab_logs",
+};
+const EMBED_HEIGHT_PX = 640;
+
 const zh: Dict = {
     "nav": "bili设置",
     "title": "billion-context 压缩代理",
     "open": "打开 Web UI",
     "hint": "查看压缩状态、会话与上下文窗口。",
     "degraded": "当前 dsh 进程未绑定 bili 代理（未经 bili dsh 启动，或代理尚未就绪）——先运行 /acp，或改用 bili dsh 启动。",
+    "tab_overview": "总览",
+    "tab_sessions": "会话",
+    "tab_config": "配置",
+    "tab_logs": "日志",
 };
 
 const en: Dict = {
@@ -75,6 +101,10 @@ const en: Dict = {
     "open": "Open Web UI",
     "hint": "Inspect compression status, sessions and context windows.",
     "degraded": "This dsh process is not bound to a bili proxy (not launched via bili dsh, or the proxy is not up yet) — run /acp first, or launch through bili dsh.",
+    "tab_overview": "Overview",
+    "tab_sessions": "Sessions",
+    "tab_config": "Config",
+    "tab_logs": "Logs",
 };
 
 function readOrigin(): string | undefined {
@@ -137,9 +167,11 @@ export function apply(ctx: ClientContext): void {
     const t = ctx.locale.bind(NS);
     const panel = (titled: boolean): ((props: Record<string, unknown>) => unknown) => () => {
         const [origin, setOrigin] = useState<string | undefined>(readOrigin());
+        const [page, setPage] = useState<PageId>("overview");
         // #2288: no guard on the snapshot — the live route is authoritative
         // for the whole mount, so a stale boot value is corrected in place.
         useEffect(() => probeOrigin(setOrigin), []);
+        const lang = t("nav") === zhDict.nav ? "zh" : "en";
         return createElement(
             "div",
             { style: { display: "flex", flexDirection: "column", gap: 12, padding: "20px 8px" } },
@@ -147,26 +179,75 @@ export function apply(ctx: ClientContext): void {
             origin === undefined
                 ? createElement("p", { style: { margin: 0, opacity: 0.7, lineHeight: 1.6 } }, t("degraded"))
                 : createElement(
-                    "button",
-                    {
-                        type: "button",
-                        onClick: () => openExternal(`${origin}/__bili/`),
+                    "div",
+                    { style: { display: "flex", flexDirection: "column", gap: 10 } },
+                    createElement(
+                        "div",
+                        { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+                        PAGE_IDS.map((id) =>
+                            createElement(
+                                "button",
+                                {
+                                    key: id,
+                                    type: "button",
+                                    onClick: () => setPage(id),
+                                    style: {
+                                        cursor: "pointer",
+                                        borderRadius: 8,
+                                        border: id === page ? "1px solid rgba(127,127,127,0.7)" : "1px solid rgba(127,127,127,0.4)",
+                                        background: id === page ? "rgba(127,127,127,0.12)" : "transparent",
+                                        color: "inherit",
+                                        fontFamily: "inherit",
+                                        fontSize: 13,
+                                        fontWeight: id === page ? 600 : 400,
+                                        lineHeight: "20px",
+                                        padding: "4px 14px",
+                                    },
+                                },
+                                t(PAGE_KEYS[id]),
+                            ),
+                        ),
+                    ),
+                    createElement("iframe", {
+                        src: `${origin}/__bili/?embed=1&lang=${lang}#/${page}`,
+                        title: t("title"),
                         style: {
-                            alignSelf: "flex-start",
-                            cursor: "pointer",
-                            borderRadius: 8,
+                            display: "block",
+                            width: "100%",
+                            height: EMBED_HEIGHT_PX,
                             border: "1px solid rgba(127,127,127,0.4)",
+                            borderRadius: 8,
                             background: "transparent",
-                            color: "inherit",
-                            fontFamily: "inherit",
-                            fontSize: 14,
-                            lineHeight: "22px",
-                            padding: "7px 16px",
                         },
-                    },
-                    `${t("open")}（${origin}）`,
+                    }),
                 ),
-            createElement("p", { style: { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6 } }, t("hint")),
+            createElement(
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: 10 } },
+                createElement("p", { style: { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6, flex: 1 } }, t("hint")),
+                origin === undefined
+                    ? null
+                    : createElement(
+                        "button",
+                        {
+                            type: "button",
+                            onClick: () => openExternal(`${origin}/__bili/`),
+                            style: {
+                                cursor: "pointer",
+                                borderRadius: 8,
+                                border: "1px solid rgba(127,127,127,0.4)",
+                                background: "transparent",
+                                color: "inherit",
+                                fontFamily: "inherit",
+                                fontSize: 14,
+                                lineHeight: "22px",
+                                padding: "7px 16px",
+                                whiteSpace: "nowrap",
+                            },
+                        },
+                        `${t("open")}（${origin}）`,
+                    ),
+            ),
         );
     };
     ctx.slots.inject(
