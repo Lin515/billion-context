@@ -23,15 +23,15 @@ export interface RunawayVerdict {
     };
 }
 
-export interface RunawayGuard {
+interface RunawayGuard {
     /** Feed one chunk of RAW wire text (utf8-decoded SSE/JSON body). Stateful across chunk boundaries. */
     feed(chunkText: string): RunawayVerdict;
 }
 
 // Scale thresholds sit far above any legitimate single-message maximum.
 export const ACP_TAG_THRESHOLD = 50; // legit single-msg ceiling observed: 11
-export const MONO_REF_RUN_THRESHOLD = 50; // corroborator: consecutive +1 kernel refs
-export const ZERO_TOKEN_FRACTION = 0.9; // corroborator: >=90% of counted tags carry tokens="0"
+const MONO_REF_RUN_THRESHOLD = 50; // corroborator: consecutive +1 kernel refs
+const ZERO_TOKEN_FRACTION = 0.9; // corroborator: >=90% of counted tags carry tokens="0"
 export const TOOL_XML_THRESHOLD = 300; // legit multi-tool turns << this; runaway B ~= 8700
 
 // Bounded carry-over so a marker split across two chunks is still seen whole. Longer
@@ -81,7 +81,9 @@ export function createRunawayGuard(): RunawayGuard {
             const tm = TOKENS_ATTR_RE.exec(m[1] ?? "");
             if (tm && tm[1] === "0") zeroTokens += 1;
             // The kernel ref sits immediately after the opening (<…>mNNNNN</…>); read a
-            // short window past the ">" so a ref split across the boundary is still caught.
+            // short window past the ">". A ref split at a chunk boundary is missed (its
+            // open tag already left pending) — that only ever SHORTENS a monotonic run,
+            // i.e. fail-safe direction: a miss, never a false corroboration.
             const rm = REF_RE.exec(scan.slice(end, end + 48));
             if (rm) {
                 const n = Number.parseInt(rm[1], 10);
