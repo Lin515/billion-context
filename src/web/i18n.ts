@@ -98,6 +98,13 @@ export const MESSAGES: Record<Locale, Record<string, string>> = {
         "conflict.risk_active": "的痕迹。两个压缩器作用于同一会话会双压缩、破坏消息引用，可能导致上下文错乱——请只保留一个压缩器。",
         "conflict.risk_sibling": "的痕迹。它们是 bili 自家的兄弟扩展，不是第三方压缩插件：当 bili 主导会话时会自动让位（native 模式经 BILLION_CONTEXT_NATIVE 标记、launcher/手动接线经 /bili/ baseUrl 自检），没有第二个压缩器在活动——确认版本较新后清除本记录即可，无需移除任何插件。",
         "conflict.risk_historical": "的痕迹（最近 7 天无新事件，以下为存量记录）——确认另一个压缩器已移除或被 bili 拦截后，可点右侧按钮清除。",
+        // #2324: name-only [suspected] matches are NOT confirmed compressors — never command removal on a name.
+        "conflict.on_suspected": "检测到疑似压缩插件",
+        "conflict.what_suspected": "名称含压缩关键词的插件（尚未确认其是否真的压缩上下文）",
+        "conflict.risk_suspected": "——这仅是按名称关键词匹配的【疑似】信号，不是已观察到的双压缩证据。请确认其是否真的改写发给模型的上下文；只改终端显示 / 折叠工具输出的插件（如 pi-compact-transcript）不会双压缩、无需移除。",
+        // #2324: the age split describes record recency, not whether a plugin is running now.
+        "conflict.age_active": "近 7 天 {n} 条",
+        "conflict.age_historical": "更早 {n} 条",
         "conflict.where": "详情见下方 Sessions 页或 GET /__bili/stats → conflicts。",
         "conflict.clear_btn": "清除记录",
         "conflict.cleared": "冲突记录已清除",
@@ -463,6 +470,13 @@ export const MESSAGES: Record<Locale, Record<string, string>> = {
         "conflict.risk_active": " were found. Two compressors on one conversation double-compress and corrupt message refs, which can scramble context — keep exactly one compressor.",
         "conflict.risk_sibling": " were found. These are bili's OWN sibling extensions, not third-party compressors: while bili drives the session they stand down automatically (BILLION_CONTEXT_NATIVE marker in native mode, /bili/ baseUrl self-check otherwise), so no second compressor is active — verify your versions are recent and clear this record; nothing needs removing.",
         "conflict.risk_historical": " were found (no events in the last 7 days — stock records only) — once you've confirmed the other compressor is removed or blocked by bili, clear them with the button.",
+        // #2324: see the zh entries above — suspected is name-only, never command removal.
+        "conflict.on_suspected": "Possible compression plugin detected",
+        "conflict.what_suspected": "a plugin whose name matches compression keywords (not yet verified to actually compress context)",
+        "conflict.risk_suspected": " — a name-only [suspected] signal, not observed evidence of double-compression. Confirm it actually rewrites the model context before acting; a display / tool-output-folding plugin (e.g. pi-compact-transcript) does not double-compress and needs no removal.",
+        // #2324: age split = record recency, not whether a plugin is running now.
+        "conflict.age_active": "{n} in last 7 days",
+        "conflict.age_historical": "{n} older",
         "conflict.where": "Details: Sessions page below or GET /__bili/stats → conflicts.",
         "conflict.clear_btn": "Clear records",
         "conflict.cleared": "Conflict records cleared",

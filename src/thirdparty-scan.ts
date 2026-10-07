@@ -164,8 +164,34 @@ export function isOpencodeAcpEntry(entry: string): boolean {
     return bare === "opencode-acp" || /^opencode-acp@/.test(bare) || /(^|[/\\])opencode-acp([/\\]|$)/.test(trimmed);
 }
 
+// #2324: third-party plugins VERIFIED to touch only terminal rendering / tool-output
+// folding and never the model context — so a name like "pi-compact-transcript" must not
+// raise a compression-conflict alarm. Matched as an EXACT token — bare name, npm spec
+// (with or without version), or a bounded path segment — mirroring isOpencodeAcpEntry's
+// discipline so the two can't drift. Deliberately NOT a transcript/display substring rule:
+// a real compressor ("context-compactor") or a lookalike ("my-pi-compact-transcript-fork")
+// must still flag. Evidence-backed, one entry at a time.
+const KNOWN_DISPLAY_ONLY = new Set<string>([
+    // pi terminal extension: folds tool output / re-lays AssistantMessage rendering,
+    // registers display toggles; README states "changes display only" — no context
+    // replacement or compression handler (#2324).
+    "pi-compact-transcript",
+]);
+
+export function isKnownDisplayOnlyPlugin(entry: string): boolean {
+    const trimmed = entry.trim();
+    const bare = trimmed.replace(/^npm:/, "");
+    for (const name of KNOWN_DISPLAY_ONLY) {
+        if (bare === name || bare.startsWith(name + "@")) return true;
+        const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`(^|[/\\\\])${esc}([/\\\\]|$)`).test(trimmed)) return true;
+    }
+    return false;
+}
+
 function classifyOpencodeEntry(c: Collector, entry: string, source: string): void {
     if (isBiliSelf(entry)) return;
+    if (isKnownDisplayOnlyPlugin(entry)) return;
     if (isOpencodeAcpEntry(entry)) {
         add(c, { client: "opencode", entry, source, match: "known", knownId: "opencode-acp" });
         return;
@@ -253,6 +279,7 @@ function scanPi(env: NodeJS.ProcessEnv, cwd: string): ScanResult {
                 add(c, { client: "pi", entry: p, source: file, match: "known", knownId: "billion-context-pi" });
                 continue;
             }
+            if (isKnownDisplayOnlyPlugin(p)) continue;
             if (KEYWORD_RE.test(entryName(p))) add(c, { client: "pi", entry: p, source: file, match: "keyword" });
         }
     }
@@ -280,6 +307,7 @@ function scanOmp(env: NodeJS.ProcessEnv): ScanResult {
             if (item) {
                 const entry = item[1]!.trim().replace(/^["']|["']$/g, "");
                 if (!entry || isBiliSelf(entry)) continue;
+                if (isKnownDisplayOnlyPlugin(entry)) continue;
                 if (KEYWORD_RE.test(entryName(entry))) add(c, { client: "omp", entry, source: file, match: "keyword" });
                 continue;
             }
@@ -311,6 +339,7 @@ function scanKimi(env: NodeJS.ProcessEnv): ScanResult {
     }
     for (const id of ids) {
         if (id === "billion-context") continue;
+        if (isKnownDisplayOnlyPlugin(id)) continue;
         if (KEYWORD_RE.test(id)) add(c, { client: "kimi", entry: id, source: registry, match: "keyword" });
     }
     return { client: "kimi", findings: c.findings, sourcesScanned: c.sources };
@@ -330,6 +359,7 @@ function scanHermes(env: NodeJS.ProcessEnv): ScanResult {
     // description mentioning "context"/"summarize".
     for (const e of entries) {
         if (!e.isDirectory() || e.name === "billion-context") continue;
+        if (isKnownDisplayOnlyPlugin(e.name)) continue;
         if (KEYWORD_RE.test(e.name)) add(c, { client: "hermes", entry: e.name, source: path.join(pluginsDir, e.name), match: "keyword" });
     }
     return { client: "hermes", findings: c.findings, sourcesScanned: c.sources };
@@ -355,6 +385,7 @@ function scanDsh(env: NodeJS.ProcessEnv): ScanResult {
             if (!deps || typeof deps !== "object" || Array.isArray(deps)) continue;
             for (const dep of Object.keys(deps as Record<string, unknown>)) {
                 if (dep === "billion-context") continue;
+                if (isKnownDisplayOnlyPlugin(dep)) continue;
                 if (KEYWORD_RE.test(dep)) add(c, { client: "dsh", entry: dep, source: file, match: "keyword" });
             }
         }
@@ -379,13 +410,16 @@ function scanClaude(env: NodeJS.ProcessEnv, cwd: string): ScanResult {
         const enabled = obj.enabledPlugins;
         if (enabled && typeof enabled === "object" && !Array.isArray(enabled)) {
             for (const name of Object.keys(enabled as Record<string, unknown>)) {
+                if (isKnownDisplayOnlyPlugin(name)) continue;
                 if (KEYWORD_RE.test(name)) add(c, { client: "claude", entry: name, source: file, match: "keyword" });
             }
         }
         const plugins = obj.plugins;
         if (Array.isArray(plugins)) {
             for (const p of plugins) {
-                if (typeof p === "string" && p !== "" && KEYWORD_RE.test(p)) add(c, { client: "claude", entry: p, source: file, match: "keyword" });
+                if (typeof p !== "string" || p === "") continue;
+                if (isKnownDisplayOnlyPlugin(p)) continue;
+                if (KEYWORD_RE.test(p)) add(c, { client: "claude", entry: p, source: file, match: "keyword" });
             }
         }
     }
@@ -393,6 +427,7 @@ function scanClaude(env: NodeJS.ProcessEnv, cwd: string): ScanResult {
         const dir = path.join(env.CLAUDE_CONFIG_DIR ?? path.join(env.HOME ?? env.USERPROFILE ?? ".", ".claude"), "plugins");
         for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
             if (!e.isDirectory()) continue;
+            if (isKnownDisplayOnlyPlugin(e.name)) continue;
             if (KEYWORD_RE.test(e.name)) add(c, { client: "claude", entry: e.name, source: path.join(dir, e.name), match: "keyword" });
         }
     } catch { /* no plugins dir */ }

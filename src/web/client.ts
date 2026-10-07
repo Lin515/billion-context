@@ -59,8 +59,9 @@ export const WEB_CLIENT = `(function () {
             else hidden += 1;
         }
         let line = c.events + " event(s) in " + c.sessions + " session(s)" + (kinds ? ": " + kinds : "");
+        // #2324: the split is record RECENCY, not liveness — "active" read as a running conflict.
         if (typeof c.active === "number" && typeof c.historical === "number") {
-            line += " · " + c.active + " active · " + c.historical + " historical";
+            line += " · " + t("conflict.age_active", { n: c.active }) + " · " + t("conflict.age_historical", { n: c.historical });
         }
         if (shown.length > 0) {
             line += " — " + shown.map((x) => escapeHtml(x.name) + (x.n > 1 ? "×" + x.n : "")).join(" · ");
@@ -68,7 +69,32 @@ export const WEB_CLIENT = `(function () {
         if (hidden > 0) line += " · …+" + hidden + " more (GET /__bili/stats → conflicts)";
         return line;
     }
+    // #2324: pick the banner title/risk wording from the ledger families present. Name-only
+    // [suspected] matches are NEVER treated as confirmed compressors — they get a softer
+    // "verify first" framing, not the imperative double-compression warning. Old payloads
+    // without c.suspected degrade to the previous all-confirmed view. Pure (reads only c),
+    // exported for tests the same way bili_conflictLine is.
+    function bili_conflictSeverity(c) {
+        const pluginN = (c.kinds && c.kinds["third-party-plugin"]) || 0;
+        const siblingN = Math.max(0, Math.min(typeof c.sibling === "number" ? c.sibling : 0, pluginN));
+        const suspectedN = Math.max(0, Math.min(typeof c.suspected === "number" ? c.suspected : 0, pluginN - siblingN));
+        const confirmedTpN = Math.max(0, pluginN - siblingN - suspectedN);
+        const nativeN = Math.max(0, c.events - pluginN);
+        const whatParts = [];
+        if (confirmedTpN > 0) whatParts.push(t("conflict.what_plugin"));
+        if (suspectedN > 0) whatParts.push(t("conflict.what_suspected"));
+        if (siblingN > 0) whatParts.push(t("conflict.what_sibling"));
+        if (nativeN > 0) whatParts.push(t("conflict.what_native"));
+        const active = typeof c.active === "number" ? c.active : c.events;
+        const hasConfirmed = confirmedTpN > 0 || nativeN > 0;
+        let onKey, riskKey;
+        if (hasConfirmed) { onKey = "conflict.on"; riskKey = active > 0 ? "conflict.risk_active" : "conflict.risk_historical"; }
+        else if (suspectedN > 0) { onKey = "conflict.on_suspected"; riskKey = "conflict.risk_suspected"; }
+        else { onKey = "conflict.on"; riskKey = "conflict.risk_sibling"; }
+        return { onKey: onKey, riskKey: riskKey, hasConfirmed: hasConfirmed, what: whatParts.join(t("conflict.what_join")), active: active };
+    }
     window.bili_conflictLine = bili_conflictLine;
+    window.bili_conflictSeverity = bili_conflictSeverity;
     function $(id) { return document.getElementById(id); }
     function toast(message, kind) {
         const host = $("toast-host");
@@ -383,16 +409,10 @@ export const WEB_CLIENT = `(function () {
                 // #2261: bili's own siblings (billion-context-pi / opencode-acp) are NOT
                 // third-party plugins — the server counts them separately so the sentence
                 // never mislabels them or commands removal of something that stands down.
-                const pluginN = (c.kinds && c.kinds["third-party-plugin"]) || 0;
-                const siblingN = Math.max(0, Math.min(typeof c.sibling === "number" ? c.sibling : 0, pluginN));
-                const tpN = pluginN - siblingN;
-                const nativeN = c.events - pluginN;
-                const what = [tpN > 0 ? t("conflict.what_plugin") : "", siblingN > 0 ? t("conflict.what_sibling") : "", nativeN > 0 ? t("conflict.what_native") : ""].filter(Boolean).join(t("conflict.what_join"));
-                const active = typeof c.active === "number" ? c.active : c.events;
-                const risk = tpN === 0 && nativeN === 0 ? t("conflict.risk_sibling") : (active > 0 ? t("conflict.risk_active") : t("conflict.risk_historical"));
-                cb.innerHTML = '<strong>' + t("conflict.on") + "</strong>" + t("conflict.found") + escapeHtml(what) + risk + '<span class="mono">(' + bili_conflictLine(c) + ")</span>" + t("conflict.where") + '<button id="conflicts-clear-btn" class="btn sm">' + t("conflict.clear_btn") + "</button>";
-                cb.classList.toggle("info", active === 0);
-                cb.classList.toggle("warn", active > 0);
+                const sev = bili_conflictSeverity(c);
+                cb.innerHTML = '<strong>' + t(sev.onKey) + "</strong>" + t("conflict.found") + escapeHtml(sev.what) + t(sev.riskKey) + '<span class="mono">(' + bili_conflictLine(c) + ")</span>" + t("conflict.where") + '<button id="conflicts-clear-btn" class="btn sm">' + t("conflict.clear_btn") + "</button>";
+                cb.classList.toggle("info", !(sev.hasConfirmed && sev.active > 0));
+                cb.classList.toggle("warn", sev.hasConfirmed && sev.active > 0);
                 const btn = $("conflicts-clear-btn");
                 if (btn) {
                     btn.addEventListener("click", async () => {

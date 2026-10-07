@@ -8,7 +8,7 @@ process.env.NODE_ENV = "test";
 
 import { createInitialState } from "acp-kernel";
 import type { Session } from "../src/session.ts";
-import { clearScanCache, conflictScanEnabled, isDesignBenign, isOpencodeAcpEntry, isSiblingConflictDetail, scanClientPlugins, sniffScanClient, type ThirdPartyFinding } from "../src/thirdparty-scan.js";
+import { clearScanCache, conflictScanEnabled, isDesignBenign, isKnownDisplayOnlyPlugin, isOpencodeAcpEntry, isSiblingConflictDetail, scanClientPlugins, sniffScanClient, type ThirdPartyFinding } from "../src/thirdparty-scan.js";
 import { CONFLICT_LEDGER_MAX, conflictEventsOf, formatConflictSection, recordConflict, summarizeConflicts } from "../src/conflict-watch.js";
 import { resolveHermesHome, resolveKimiHome, resolveOmpHome, resolvePiHome } from "../src/client-config.js";
 import { SessionStore, _setStoreForTest } from "../src/persist.js";
@@ -183,6 +183,34 @@ test("pi scan: legacy bcp entry is known-conflict, keyword entries flagged, bili
     assert.ok(res.findings.some((f) => f.entry === "npm:context-compactor" && f.match === "keyword"), "action-token name still flagged");
     assert.ok(!res.findings.some((f) => f.entry === "npm:context-forge"), "bare-'context' tool must NOT be flagged (#1736)");
     assert.ok(!res.findings.some((f) => f.entry.includes("dist/agent/pi.js")), "bili's own extension path must be skipped");
+});
+
+test("pi scan: verified display-only plugin excluded by resolved package name, real compressors still flagged (#2324)", () => {
+    clearScanCache();
+    const root = tmp("bili-2324-pi-");
+    const cwd = tmp("bili-2324-pi-cwd-");
+    const env: NodeJS.ProcessEnv = { ...hermeticEnv(root), PI_HOME: path.join(root, ".pi", "agent") };
+    const home = resolvePiHome(env);
+    assertTestOwned(path.join(home, "settings.json"), root);
+    // bare + versioned npm spec of the same display-only plugin, plus a REAL compressor
+    // that shares no name with the allowlist entry — must stay flagged.
+    writeFile(path.join(home, "settings.json"), JSON.stringify({
+        packages: ["npm:billion-context", "npm:pi-compact-transcript", "npm:pi-compact-transcript@0.10.1", "npm:context-compactor"],
+    }));
+    const res = scanClientPlugins("pi", { env, cwd });
+    assert.ok(!res.findings.some((f) => f.entry.includes("pi-compact-transcript")), "display-only plugin never flagged, any spec form");
+    assert.ok(res.findings.some((f) => f.entry === "npm:context-compactor" && f.match === "keyword"), "real compressor still flagged");
+});
+
+test("opencode scan: display-only plugin excluded by exact name, lookalike compressor NOT excluded (#2324)", () => {
+    clearScanCache();
+    const root = tmp("bili-2324-oc-");
+    const file = path.join(root, ".config", "opencode", "opencode.json");
+    assertTestOwned(file, root);
+    writeFile(file, JSON.stringify({ plugin: ["npm:pi-compact-transcript", "npm:my-pi-compact-transcript-fork"] }));
+    const res = scanClientPlugins("opencode", { env: hermeticEnv(root), cwd: root });
+    assert.ok(!res.findings.some((f) => f.entry === "npm:pi-compact-transcript"), "exact display-only name excluded");
+    assert.ok(res.findings.some((f) => f.entry === "npm:my-pi-compact-transcript-fork" && f.match === "keyword"), "lookalike is NOT on the allowlist -> still flagged");
 });
 
 test("omp scan: extensions block parsed, bili entry skipped, keyword flagged", () => {
@@ -394,6 +422,16 @@ test("isOpencodeAcpEntry recognizes every spec form, rejects lookalikes (#2261)"
     assert.ok(!isOpencodeAcpEntry("context-forge"));
 });
 
+test("isKnownDisplayOnlyPlugin resolves bare/npm-versioned/path forms, rejects lookalikes (#2324)", () => {
+    assert.ok(isKnownDisplayOnlyPlugin("pi-compact-transcript"));
+    assert.ok(isKnownDisplayOnlyPlugin("npm:pi-compact-transcript"));
+    assert.ok(isKnownDisplayOnlyPlugin("npm:pi-compact-transcript@0.10.1"));
+    assert.ok(isKnownDisplayOnlyPlugin("/u/node_modules/pi-compact-transcript/index.js"));
+    assert.ok(!isKnownDisplayOnlyPlugin("my-pi-compact-transcript-fork"), "substring lookalike NOT excluded");
+    assert.ok(!isKnownDisplayOnlyPlugin("context-compactor"), "real compressor not excluded");
+    assert.ok(!isKnownDisplayOnlyPlugin("pi-context"), "unrelated name not excluded");
+});
+
 test("isSiblingConflictDetail maps recorded details back to sibling entries (#2261)", () => {
     assert.ok(isSiblingConflictDetail("pi: npm:billion-context-pi (/home/dog/.pi/agent/settings.json)"));
     assert.ok(isSiblingConflictDetail("pi: billion-context-pi@0.1.75 (~/.pi/settings.json)"));
@@ -426,6 +464,19 @@ test("summarizeConflicts counts sibling-tagged plugin events additively (#2261)"
     assert.equal(s.events, 3);
     assert.equal(s.kinds["third-party-plugin"], 2);
     assert.equal(s.sibling, 1, "only the bcp event classifies as sibling");
+});
+
+test("summarizeConflicts counts [suspected] plugin events additively, disjoint from sibling (#2324)", () => {
+    const a = makeSession();
+    recordConflict(a, "third-party-plugin", "pi: npm:billion-context-pi (/home/dog/.pi/agent/settings.json)");
+    recordConflict(a, "third-party-plugin", "omp: npm:context-compactor (/home/dog/.omp/agent/config.yml) [suspected]");
+    recordConflict(a, "third-party-plugin", "pi: npm:context-forge (/home/dog/.pi/agent/settings.json) [suspected]");
+    recordConflict(a, "orphan-reap", "1 block(s) deactivated: b1");
+    const s = summarizeConflicts([a]);
+    assert.equal(s.events, 4);
+    assert.equal(s.kinds["third-party-plugin"], 3);
+    assert.equal(s.sibling, 1, "the bcp event classifies as sibling");
+    assert.equal(s.suspected, 2, "both [suspected] events counted; additive within kinds[third-party-plugin], disjoint from sibling");
 });
 
 test("formatConflictSection: sibling-only ledgers drop the one-compressor command (#2261)", () => {

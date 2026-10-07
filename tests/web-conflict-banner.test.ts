@@ -8,19 +8,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { WEB_CLIENT } from "../src/web/client.ts";
 
-const START_MARK = "function escapeHtml";
+// #2324: bili_conflictLine now localizes its age labels via t(), so the extracted
+// slice must reach back to the IIFE top ("use strict") to capture MESSAGES/locale/t.
+// In the Node test env localStorage/navigator throw inside the guarded try/catch, so
+// locale deterministically defaults to "zh-CN" — assertions below expect zh labels.
+const START_MARK = '"use strict";';
 const END_MARK = "window.bili_conflictLine = bili_conflictLine;";
 
 type LatestEntry = { kind: string; detail?: string; at?: number; sessionId?: string };
 type BannerInput = { events?: number; sessions?: number; active?: number; historical?: number; kinds?: Record<string, number>; latest?: LatestEntry[] };
+type SeverityInput = BannerInput & { sibling?: number; suspected?: number };
+interface Severity { onKey: string; riskKey: string; hasConfirmed: boolean; what: string; active: number }
 
-function bannerLine(): (c: BannerInput) => string {
+// Both helpers share the same extracted slice (they sit together in WEB_CLIENT);
+// the slice ends at the first window.* export so no `window` reference runs under Node.
+function _extract(): { line: (c: BannerInput) => string; severity: (c: SeverityInput) => Severity } {
     const s = WEB_CLIENT.indexOf(START_MARK);
     const e = WEB_CLIENT.indexOf(END_MARK);
     assert.ok(s >= 0 && e > s, "conflict-banner helpers missing from WEB_CLIENT");
-    const src = WEB_CLIENT.slice(s, e) + "\nreturn bili_conflictLine;";
-    return new Function(src)() as (c: BannerInput) => string;
+    const src = WEB_CLIENT.slice(s, e) + "\nreturn { line: bili_conflictLine, severity: bili_conflictSeverity };";
+    return new Function(src)() as { line: (c: BannerInput) => string; severity: (c: SeverityInput) => Severity };
 }
+function bannerLine(): (c: BannerInput) => string { return _extract().line; }
+function bannerSeverity(): (c: SeverityInput) => Severity { return _extract().severity; }
 
 test("banner line shows FULL identity (client: entry + source), dedupe, weights, suspected marker (#2045)", () => {
     const f = bannerLine();
@@ -103,11 +113,13 @@ test("banner line appends the active/historical split when present, degrades whe
     // entries at distinct times stay separate rows — each row keeps its "when"
     // (the whole point of #2102 sub-problem ①). The ×N weight only collapses
     // identity-only names (plugin entries), never time-stamped ones.
+    // #2324: the split is now localized record-recency labels (zh-CN under the
+    // Node test env), not "N active / M historical" which read as liveness.
     const withSplit = f({ ...base, active: 0, historical: 22 });
     assert.equal(withSplit,
-        "22 event(s) in 6 session(s): unannounced-rewrite×22 · 0 active · 22 historical — [2026-10-03 05:02Z] abcde…: d1 · [2026-10-03 04:58Z] abcde…: d1");
+        "22 event(s) in 6 session(s): unannounced-rewrite×22 · 近 7 天 0 条 · 更早 22 条 — [2026-10-03 05:02Z] abcde…: d1 · [2026-10-03 04:58Z] abcde…: d1");
     const withoutSplit = f(base);
-    assert.equal(withoutSplit.indexOf("active"), -1, "old payloads without active/historical keep the old shape");
+    assert.equal(withoutSplit.indexOf("近 7 天"), -1, "payloads without active/historical emit no age split at all");
     assert.equal(withoutSplit,
         "22 event(s) in 6 session(s): unannounced-rewrite×22 — [2026-10-03 05:02Z] abcde…: d1 · [2026-10-03 04:58Z] abcde…: d1");
 });
@@ -126,6 +138,64 @@ test("banner line caps NON-plugin items at 4 with a stats pointer; plugin items 
     const out = f({ events: 11, sessions: 7, kinds: { "third-party-plugin": 6, "unannounced-rewrite": 5 }, latest });
     assert.equal(out,
         "11 event(s) in 7 session(s): third-party-plugin×6, unannounced-rewrite×5 — pi: p1 (/tmp/settings.json) · pi: p2 (/tmp/settings.json) · pi: p3 (/tmp/settings.json) · pi: p4 (/tmp/settings.json) · pi: p5 (/tmp/settings.json) · pi: p6 (/tmp/settings.json) · [2026-10-03 05:00Z] aaaa1…: np-one · [2026-10-03 05:01Z] cccc2…: np-two · [2026-10-03 05:02Z] eeee3…: np-three · [2026-10-03 05:03Z] gggg4…: np-four · …+1 more (GET /__bili/stats → conflicts)");
+});
+
+// #2324: the banner's title/risk selection must NEVER treat name-only [suspected] matches
+// as confirmed compressors. Assert on the i18n KEYS (locale-independent) so this pins the
+// decision logic regardless of zh/en wording.
+test("#2324 suspected-only ledger -> soft 'verify first' framing, no confirmed-conflict warning", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 96, sessions: 96, kinds: { "third-party-plugin": 96 }, sibling: 0, suspected: 96, active: 96, historical: 0 });
+    assert.strictEqual(r.hasConfirmed, false);
+    assert.strictEqual(r.onKey, "conflict.on_suspected");
+    assert.strictEqual(r.riskKey, "conflict.risk_suspected");
+    assert.strictEqual(r.active, 96);
+});
+
+test("#2324 confirmed third-party plugin keeps the double-compression warning (active)", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 10, kinds: { "third-party-plugin": 10 }, suspected: 0, active: 5, historical: 5 });
+    assert.strictEqual(r.hasConfirmed, true);
+    assert.strictEqual(r.onKey, "conflict.on");
+    assert.strictEqual(r.riskKey, "conflict.risk_active");
+});
+
+test("#2324 confirmed plugin with only historical stock -> risk_historical", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 4, kinds: { "third-party-plugin": 4 }, suspected: 0, active: 0, historical: 4 });
+    assert.strictEqual(r.hasConfirmed, true);
+    assert.strictEqual(r.riskKey, "conflict.risk_historical");
+});
+
+test("#2324 sibling-only -> stands-down framing, not a confirmed conflict (#2261 preserved)", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 3, kinds: { "third-party-plugin": 3 }, sibling: 3, suspected: 0, active: 3 });
+    assert.strictEqual(r.hasConfirmed, false);
+    assert.strictEqual(r.onKey, "conflict.on");
+    assert.strictEqual(r.riskKey, "conflict.risk_sibling");
+});
+
+test("#2324 mixed suspected+confirmed -> strong warning retained while naming both families", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 10, kinds: { "third-party-plugin": 10 }, sibling: 0, suspected: 6, active: 10 });
+    assert.strictEqual(r.hasConfirmed, true, "a single confirmed event keeps the imperative warning");
+    assert.strictEqual(r.riskKey, "conflict.risk_active");
+    assert.ok(r.what.length > 0, "families named");
+});
+
+test("#2324 native-compaction-only -> confirmed conflict framing", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 7, kinds: { "native-compaction": 7 }, active: 7 });
+    assert.strictEqual(r.hasConfirmed, true);
+    assert.strictEqual(r.onKey, "conflict.on");
+    assert.strictEqual(r.riskKey, "conflict.risk_active");
+});
+
+test("#2324 old payload without c.suspected degrades to the previous all-confirmed view", () => {
+    const sev = bannerSeverity();
+    const r = sev({ events: 96, sessions: 96, kinds: { "third-party-plugin": 96 }, active: 96 });
+    assert.strictEqual(r.hasConfirmed, true);
+    assert.strictEqual(r.riskKey, "conflict.risk_active");
 });
 
 test("banner wiring: conflicts-banner branch renders bili_conflictLine (drift guard)", () => {
