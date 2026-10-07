@@ -5670,11 +5670,11 @@ async function preflightCompressIfNeeded(
     }
     // #1933 F1: scale the local text estimate by the per-route calibration
     // factor k̂ learned from this session's own usage reports (local estimate ÷
-    // what upstream actually billed, EMA, clamped 0.25–1 — one-way, deflate
-    // only; see settleUsageReport). Unknown/mismatched origin → raw estimate,
-    // i.e. today's behavior. #2117 B: the model dimension gates too — a factor
-    // learned on another model acts as absent here rather than deciding with a
-    // cross-model billing scale (currentCalibrationFactor).
+    // what upstream actually billed; clamped 0.25–4, two-way since #2366 — see
+    // settleUsageReport). Unknown/mismatched origin → raw estimate, i.e. the
+    // uncalibrated legacy behavior. #2117 B: the model dimension gates too — a
+    // factor learned on another model acts as absent here rather than deciding
+    // with a cross-model billing scale (currentCalibrationFactor).
     const kFactor = currentCalibrationFactor(session.stats, session.metadata?.lastModel);
     const kOrigin = session.stats.calibratedEstimateOrigin;
     const calibratedText = applyEstimateCalibration(textEstimate + overheadEstimate, kFactor, kOrigin, currentOrigin);
