@@ -125,15 +125,16 @@ test("wrapStreamWithRunawayGuard aborts on runaway: onTrip once, clean early EOF
         },
     });
     let tripCount = 0;
-    let verdict: ReturnType<typeof createRunawayGuard>["feed"] extends never ? never : any = undefined;
+    const verdicts: RunawayVerdict[] = [];
     const out = await collect(
         wrapStreamWithRunawayGuard(src, (v) => {
             tripCount += 1;
-            verdict = v;
+            verdicts.push(v);
         }),
     );
     assert.equal(tripCount, 1);
-    assert.equal(verdict.reason, "acp-enumeration");
+    assert.equal(verdicts.length, 1);
+    assert.equal(verdicts[0].reason, "acp-enumeration");
     assert.ok(!out.toString("utf8").includes(tail), "stream must end before the post-trip tail");
     // Every forwarded byte up to the trip point is verbatim (the first N complete tag lines).
     const forwarded = out.toString("utf8");
