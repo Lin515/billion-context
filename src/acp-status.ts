@@ -37,6 +37,10 @@ function fmtBytes(n: number): string {
     return `${(n / (1024 * 1024)).toFixed(1)}MiB`;
 }
 
+// #2366: usage fraction at which the PRESSURE NOTE becomes worth showing —
+// below it the window still has headroom and "stop folding" is noise.
+const PRESSURE_NOTE_USAGE_FRACTION = 0.6;
+
 export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx): ProxyToolResult {
     const scope = typeof args.scope === "string" ? (args.scope as "compressed" | "uncompressed") : undefined;
     const view = typeof args.view === "string" ? (args.view as "ranges" | "messages") : undefined;
@@ -56,6 +60,31 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
     });
     if (scope) return toolOk(base);
     const extra: string[] = [];
+    // #2366: everything in the report above is LOCAL ESTIMATES (defaultCountTokens);
+    // on CJK-heavy routes upstream billing runs 2–4× higher, so an agent judging
+    // pressure from those figures misreads a filling window as healthy and folds
+    // late, when little compressible mass is left. Surface the usage-grade reading
+    // next to the estimate view — statusInputBaseline's provenance contract, the
+    // same number the nudge decision runs on — and flag the ratio when it diverges
+    // hard. Never-reporting upstreams have no anchor → no line.
+    const billed = statusInputBaseline(ctx.session);
+    if (billed > 0) {
+        let estTotal = 0;
+        for (const m of ctx.messages) estTotal += defaultCountTokens(m.text ?? "");
+        const srcLabel = ctx.session.stats.lastInputTokensSource === "overflow-arm" ? "overflow arm (bounded)" : "upstream usage";
+        let billedLine = `BILLED INPUT (${srcLabel}): ${billed} tok`;
+        const measuredAt = ctx.session.metadata?.contextTokensAt;
+        if (typeof measuredAt === "number") {
+            const ageMin = Math.round((Date.now() - measuredAt) / 60_000);
+            if (ageMin >= 2) billedLine += `, measured ${ageMin}m ago`;
+        }
+        if (estTotal > 0) billedLine += ` · est-view total ${estTotal} tok · ratio ${(billed / estTotal).toFixed(1)}×`;
+        extra.push("");
+        extra.push(billedLine);
+        if (estTotal > 0 && billed / estTotal >= 1.5) {
+            extra.push("NOTE: the token figures in the report above are local estimates and run well below what upstream actually bills (tokenizer-dependent; CJK-heavy content is the usual cause). Judge context pressure from BILLED INPUT; use the breakdown only to locate what to compress.");
+        }
+    }
     try {
         const turn = ctx.core.processTurn({
             messages: ctx.messages,
@@ -69,6 +98,13 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         if (nudge) {
             extra.push("");
             extra.push(nudge.shouldInject ? `Nudge: ACTIVE — ${nudge.reason}` : `Nudge: idle — ${nudge.reason}`);
+            // #2366: high billed pressure + exhausted compressible mass is the
+            // deadlock invisible from the estimate view alone — tell the agent
+            // further folding is futile (each fold rewrites the prefix and
+            // forfeits the cache hit for almost-nothing reclaimed).
+            if (!nudge.shouldInject && nudge.contextUsage >= PRESSURE_NOTE_USAGE_FRACTION && nudge.breakdown.maxPending < nudge.breakdown.nudgeGrowthTokens) {
+                extra.push(`PRESSURE NOTE: billed input sits at ${Math.round(nudge.contextUsage * 100)}% of the ${ctx.config.modelContextLimit}-token limit while max compressible mass is only ~${nudge.breakdown.maxPending} tokens — little left to fold. Repeated small folds rewrite the prefix (forfeiting cache hits) while reclaiming almost nothing; continue the task instead of folding again unless pressure climbs further.`);
+            }
             // #847: only advertise ranges the submit gate accepts — the gate
             // counts raw chars (minCompressRange), not tokens, so a range can
             // be "viable" yet deterministically uncompressible.

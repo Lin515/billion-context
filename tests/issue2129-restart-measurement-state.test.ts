@@ -138,9 +138,10 @@ test("corrupt persisted measurement values are rejected at restore (#2129)", asy
             }
         };
 
-        // Out-of-band values: a k̂ above the clamp band would INFLATE estimates
-        // (applyEstimateCalibration applies unclamped — one-way deflate contract),
-        // negative anchors/estimates are nonsense, empty origins match no route.
+        // Out-of-band values: a k̂ above the two-way clamp band [0.25, 4] (#2366)
+        // would move every calibrated reading off-scale (applyEstimateCalibration
+        // applies the stored factor unclamped), negative anchors/estimates are
+        // nonsense, empty origins match no route.
         // JSON encodes NaN/Infinity as null — the restore guards reject both.
         const bad = await loadMutated((st) => {
             st.calibratedEstimate = 5;

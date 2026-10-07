@@ -905,10 +905,10 @@ export function recordCacheSample(
  *  no cache tokens (recordCacheSample quarantines that sample). */
 // #1933 F1: estimator calibration constants. The local chars/4 estimate is a
 // proxy whose ratio to real billing varies per upstream (observed 1.3–2.5× on
-// one relay vs ~1.0× on another in the same session), so k̂ is learned per
+// one relay vs ~1.0× on another in the same session; CJK-heavy content on
+// llama-family tokenizers runs 2.4–4.0× ABOVE it, #2366), so k̂ is learned per
 // route and only applied on that route. Samples below MIN are noise (tiny
-// requests), clamps bound a single pathological sample from wrecking the EMA
-// and pin the correction to the deflate direction only (max 1, see below).
+// requests), clamps bound a single pathological sample from wrecking the mean.
 const CALIBRATION_MIN_ESTIMATE = 2000;
 // Plausibility band for admitting a sample: outside it, the report and the
 // payload it bills demonstrably don't correspond (placeholder billing, relay
@@ -916,16 +916,22 @@ const CALIBRATION_MIN_ESTIMATE = 2000;
 export const CALIBRATION_SAMPLE_MIN = 0.2;
 export const CALIBRATION_SAMPLE_MAX = 5;
 // Final clamp on the published factor: bounds how far calibration can move
-// any decision away from the raw estimate. One-way by design: the clamp max
-// is 1, so a learned factor can only DEFLATE the estimate (fire later than
-// the raw proxy would), never inflate it. Routes whose billing runs ABOVE
-// the local estimate (samples >1) publish k̂=1 — legacy raw behavior — and
-// stay covered by the overflow arm / learn-on-failure ladder instead. This
-// eliminates the class "calibration itself causes an earlier trigger": the
-// observed #1933 damage was over-triggering (37% window tax, fold churn),
-// while the opposite error already has a backstop. Discussion: PR #1940.
+// any decision away from the raw estimate, in BOTH directions since #2366.
+// It was one-way (max 1, "deflate only") by PR #1940's design: inflated
+// estimates were deemed safe because they just fire early, with the overflow
+// arm as backstop. That premise failed empirically on CJK routes — the
+// estimator runs 2.4–4.0× BELOW real billing there (#2366 evidence: 53K
+// estimated vs 152,903 billed), so under-estimating routes published k̂=1
+// forever: the >1 samples were collected into the ring and discarded at
+// publish, and every decision (preflight trigger, output budget, the
+// agent-visible status) stayed in the wrong caliber until the window filled
+// past recoverable compression. The max now bounds symmetric inflation at 4×:
+// it covers the measured CJK band and stays BELOW CALIBRATION_SAMPLE_MAX (5),
+// so non-corresponding reports are still rejected before the clamp sees them.
+// Wild values remain bounded by the evidence gates: ≥2 recent samples agreeing
+// within ×2, keyed by route AND model, MIN_ESTIMATE floor.
 export const CALIBRATION_CLAMP_MIN = 0.25;
-export const CALIBRATION_CLAMP_MAX = 1;
+export const CALIBRATION_CLAMP_MAX = 4;
 // Evidence requirements: ≥2 recent same-route samples agreeing within ×2.
 // One lucky/degenerate pair must not flip every estimate on the route.
 export const CALIBRATION_SAMPLE_WINDOW = 3;

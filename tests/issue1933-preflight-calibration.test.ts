@@ -104,9 +104,10 @@ test("settleUsageReport: cross-route starts a fresh ring and clears the old fact
 
     pair(s, 10000, "http://b", 21000);
     // 2.0/2.1 are consistent under-estimate evidence (billing ABOVE the local
-    // estimate), but calibration is one-way: the mean clamps to 1 = raw
-    // estimate, legacy behavior — it may never fire earlier than the proxy.
-    assert.equal(st.calibratedEstimate, 1, "under-estimate route clamps to k̂=1 (no inflation)");
+    // estimate). #2366 made calibration two-way (clamp [0.25, 4]): the mean
+    // publishes as-is — under-estimating routes (CJK-heavy content) must learn
+    // their real billing scale instead of being clamped back to the raw proxy.
+    assert.ok(Math.abs((st.calibratedEstimate ?? 0) - 2.05) < 1e-9, `under-estimate route learns k̂≈2.05, got ${st.calibratedEstimate}`);
     assert.equal(st.calibratedEstimateOrigin, "http://b");
 });
 
@@ -140,21 +141,21 @@ test("settleUsageReport: implausible pairs never enter the ring", () => {
     assert.equal(st.calibrationRing?.values.length, 3, "ring capped at CALIBRATION_SAMPLE_WINDOW");
 });
 
-test("settleUsageReport: published factors clamp to [0.25, 1] — one-way, deflate only", () => {
+test("settleUsageReport: published factors clamp to [0.25, 4] — bounded both ways (#2366)", () => {
     const hi = makeSession();
     pair(hi, 10000, "http://e", 45000);
     pair(hi, 10000, "http://e", 50000);
-    assert.equal(hi.stats.calibratedEstimate, 1, "mean 4.75 clamps down to 1: an under-estimating route keeps legacy behavior, calibration never inflates a reading");
+    assert.equal(hi.stats.calibratedEstimate, 4, "mean 4.75 clamps down to 4: inflation is real on under-estimating (CJK) routes but bounded — and below the sample band max 5, so non-corresponding reports are still rejected first");
 
     const lo = makeSession();
     pair(lo, 10000, "http://f", 2200);
     pair(lo, 10000, "http://f", 2400);
     assert.equal(lo.stats.calibratedEstimate, 0.25, "mean 0.23 clamps up to 0.25");
 
-    // The corrected reading can only drop BELOW the raw estimate, never rise:
-    // applying the clamped hi factor is a no-op (raw × 1), applying the lo
-    // one deflates — both bounded by the clamp range.
-    assert.equal(applyEstimateCalibration(10000, hi.stats.calibratedEstimate, "http://e", "http://e"), 10000);
+    // The corrected reading can now move either way, always inside the clamp
+    // band: applying the hi factor inflates to the bound (raw × 4), applying
+    // the lo one deflates (raw × 0.25).
+    assert.equal(applyEstimateCalibration(10000, hi.stats.calibratedEstimate, "http://e", "http://e"), 40000);
     assert.equal(applyEstimateCalibration(10000, lo.stats.calibratedEstimate, "http://f", "http://f"), 2500);
 });
 
