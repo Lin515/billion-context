@@ -64,6 +64,34 @@ test("hasToolCallStructure: plain text with no tool XML is not a structure", () 
     assert.equal(hasToolCallStructure("just plain text about tools"), false);
 });
 
+// #2348: a runaway tool-call ENUMERATION (incident B: 97KB response, 3 openers,
+// 8745 closers) used to read as a structurally complete call — one opener
+// short-circuits, thousands of closer pairs satisfy the >=2 rule. A genuine
+// fake completion carries a handful of calls, so a scale gate distinguishes
+// the two without touching any legit shape.
+test("hasToolCallStructure: a runaway close flood is NOT a structure (#2348)", () => {
+    const flood = `${LT}antml:invoke name="runaway"${GT}` +
+        Array.from({ length: 60 }, () => `${LT}parameter x="1"${GT}${LT}/parameter${GT}${LT}/invoke${GT}${LT}invoke${GT}`).join("");
+    assert.ok(flood.length > 2000, "fixture must actually be a flood");
+    assert.equal(hasToolCallStructure(flood), false);
+});
+
+test("hasToolCallStructure: close-count boundary pins the scale gate at 32 (#2348)", () => {
+    const pair = `${LT}/parameter${GT}${LT}/invoke${GT}`;
+    assert.equal(hasToolCallStructure(pair.repeat(16)), true, "32 closers is still a structure");
+    assert.equal(hasToolCallStructure(pair.repeat(17)), false, "34 closers is a flood");
+    assert.equal(hasToolCallStructure(`${LT}invoke${GT}` + pair.repeat(16)), true, "opener + 32 closers still short-circuits");
+    assert.equal(hasToolCallStructure(`${LT}invoke${GT}` + pair.repeat(17)), false, "opener cannot rescue a flood");
+});
+
+test("isFakeCompletion: a runaway enumeration is NOT a fake completion (#2348)", () => {
+    const flood = `${LT}antml:invoke name="x"${GT}` +
+        Array.from({ length: 50 }, () => `${LT}parameter${GT}${LT}/parameter${GT}${LT}/invoke${GT}${LT}invoke${GT}`).join("");
+    for (const protocol of ["anthropic", "openai", "responses"] as const) {
+        assert.equal(isFakeCompletion(protocol, flood), false, protocol);
+    }
+});
+
 test("isFakeCompletion: anthropic tool-XML with no tool_use block is a fake completion", () => {
     assert.equal(isFakeCompletion("anthropic", FAKE_XML), true);
 });

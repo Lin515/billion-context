@@ -640,6 +640,107 @@ test("legit angle-bracket text survives the loosened filter (#673)", () => {
     }
 });
 
+// #2348: the self-closing render forms (<name attrs/>, bare <name/>) are the
+// documented strip scope (module header) yet leaked on every path: whole-text
+// had no matcher for the bare form at all, and streaming read the attrs form
+// as an UNCLOSED opening whose EOF swallow then dropped the following prose
+// (measured 57 -> 3 chars). The slash must stay mandatory so a genuinely
+// unterminated open keeps its hold/swallow path.
+const SELF_ATTRS = `${OPEN}tokens="0" type="text"/>`;
+const SELF_BARE = `${LT}acp/>`;
+
+test("stripAcpTags removes self-closing render forms, keeping surrounding prose (#2348)", () => {
+    assert.equal(stripAcpTags(`前文 ${SELF_ATTRS} 后文`), "前文  后文");
+    assert.equal(stripAcpTags(`前文 ${SELF_BARE} 后文`), "前文  后文");
+    assert.equal(stripAcpTags(`${SELF_ATTRS}\n${SELF_ATTRS}\n${SELF_BARE}`), "\n\n");
+    // typo'd acplike names follow the same rule as their paired form (#673)
+    assert.equal(stripAcpTags(`${LT}acpi/>`), "");
+});
+
+test("self-close stripping never touches ordinary markup or non-acplike names (#2348)", () => {
+    const safe = [
+        `use ${LT}br/> here`,
+        `see ${LT}caption/> and ${LT}app/> docs`,
+        "a < b and b > c",
+    ];
+    for (const s of safe) {
+        assert.equal(stripAcpTags(s), s);
+        for (let split = 0; split <= s.length; split++) {
+            const f = createTagEchoFilter();
+            const out = f.push(s.slice(0, split)) + f.push(s.slice(split)) + f.flush();
+            assert.equal(out, s, `split=${split} full=${JSON.stringify(s)}`);
+        }
+    }
+});
+
+test("streaming filter matches stripAcpTags for self-closing forms at every split position (#2348)", () => {
+    const cases = [
+        `前文 ${SELF_ATTRS} 后文 prose continues.`,
+        `前文 ${SELF_BARE} 后文 prose continues.`,
+        `lead ${SELF_ATTRS}${SELF_ATTRS}${SELF_BARE} tail`,
+        `${SELF_ATTRS}\n${SELF_ATTRS}\n${SELF_ATTRS}`,
+        `好的${SELF_BARE}完毕`,
+    ];
+    for (const full of cases) {
+        const expected = stripAcpTags(full);
+        for (let split = 0; split <= full.length; split++) {
+            const f = createTagEchoFilter();
+            const out = f.push(full.slice(0, split)) + f.push(full.slice(split)) + f.flush();
+            assert.equal(out, expected, `split=${split} full=${JSON.stringify(full)}`);
+        }
+        for (let seed = 1; seed < 5; seed++) {
+            const f = createTagEchoFilter();
+            let out = "";
+            let rest = full;
+            while (rest.length > 0) {
+                const take = (seed * 7 + rest.length) % rest.length + 1;
+                out += f.push(rest.slice(0, take));
+                rest = rest.slice(take);
+            }
+            out += f.flush();
+            assert.equal(out, expected, `seed=${seed} full=${JSON.stringify(full)}`);
+        }
+    }
+});
+
+test("streaming filter accounts self-closing echoes as dropped, not swallowed prose (#2348)", () => {
+    const full = `前文 ${SELF_ATTRS} 后文 prose continues.`;
+    let dropped = "";
+    const f = createTagEchoFilter((s) => { dropped = s; });
+    let visible = "";
+    for (let i = 0; i < full.length; i += 5) visible += f.push(full.slice(i, i + 5));
+    visible += f.flush();
+    assert.equal(visible, "前文  后文 prose continues.", "the prose after the self-close must survive");
+    assert.ok(f.dropped(), "the echo is accounted as dropped");
+    assert.ok(dropped.includes("acp"), "the drop callback saw the tag bytes");
+});
+
+test("self-closing forms engage the streaming gates, non-acplike names do not (#2348)", () => {
+    assert.equal(containsRenderTagText(SELF_BARE), true);
+    assert.equal(containsRenderTagText(SELF_ATTRS), true);
+    assert.equal(mayStartRenderTag(`chunk ${SELF_BARE}`), true);
+    assert.equal(mayStartRenderTag(`chunk ${LT}acp/`), true);
+    assert.equal(mayStartRenderTag(`prose ${LT}br/>`), false);
+    assert.equal(mayStartRenderTag(`prose ${LT}caption/>`), false);
+});
+
+test("anthropic adapter keeps prose after a self-closing echo (#2348)", async () => {
+    const tagged = `好的 ${SELF_ATTRS}结论`;
+    const parts: string[] = [];
+    for (let i = 0; i < tagged.length; i += 9) parts.push(tagged.slice(i, i + 9));
+    const sseParts: string[] = [
+        `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", usage: { input_tokens: 100 } } })}\n\n`,
+        `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
+        ...parts.map((p) => `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: p } })}\n\n`),
+        `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
+        `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } })}\n\n`,
+        `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+    ];
+    const out = await drain(sseFromStrings(sseParts), createAnthropicAdapter({ model: "test" }));
+    const texts = [...out.matchAll(/"text_delta","text":"((?:[^"\\]|\\.)*)"/g)].map((m) => JSON.parse(`"${m[1]}"`) as string);
+    assert.equal(texts.join(""), "好的 结论", "no prose may be swallowed by the self-closing echo");
+});
+
 test("filter stats() accumulates lifetime input/output/dropped (#673)", () => {
     const first = `hello ${TAG("m00123")}`;
     const f = createTagEchoFilter();

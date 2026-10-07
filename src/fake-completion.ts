@@ -69,18 +69,31 @@ const TOOL_OPEN =
 const TOOL_CLOSE_GLOBAL =
     /\x3c\/(?:antml:)?(invoke|tool_calls|tool_call|parameter|parameters)\b|\\u003c\/(?:antml:)?(invoke|tool_calls|tool_call|parameter|parameters)\b/gi;
 
+// #2348: scale gate — a runaway enumeration (a model stuck looping thousands of
+// tool-XML closer pairs; instance B measured 3 openers / 8745 closers in one
+// response) used to read as "structurally complete" through BOTH branches below.
+// A genuine fake-completion echo is a handful of calls written as prose; past
+// this total-closer budget the shape is enumeration, not structure, so it must
+// not be retried as a fake completion (buffering the flood + hinting "use the
+// tool mechanism" only feeds the loop). Internal constant on purpose: no config
+// surface for a detector threshold (#2030 discipline).
+const TOOL_CLOSE_SCALE_CAP = 32;
+
 // Structural guard on top of containsToolCallXmlFragment: require an opening
 // tool tag OR 2+ distinct closing tags. A LONE closing tag in prose (a model
 // discussing tool-call code) does not qualify — that is the false positive the
 // plain fragment detector would otherwise trigger on.
 export function hasToolCallStructure(text: string): boolean {
     if (!containsToolCallXmlFragment(text)) return false;
-    if (TOOL_OPEN.test(text)) return true;
     const closes = new Set<string>();
+    let closeCount = 0;
     for (const m of text.matchAll(TOOL_CLOSE_GLOBAL)) {
+        closeCount++;
         const name = m[1] ?? m[2];
         if (name) closes.add(name.toLowerCase());
     }
+    if (closeCount > TOOL_CLOSE_SCALE_CAP) return false;
+    if (TOOL_OPEN.test(text)) return true;
     return closes.size >= 2;
 }
 

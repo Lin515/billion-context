@@ -141,6 +141,18 @@ const LONE_CLOSE = new RegExp("\x3c\\/" + NAME + "(?=[\\s>])[^<>]{0,32}>");
 // passes in stripAcpTags so the pair dies atomically instead of leaving the
 // ref behind.
 const DEGEN_PAIR = new RegExp("\x3c" + NAME + "(?:\\s[^<>]*)?>\\s*m\\d{4,}\\s*\x3c\\/[a-zA-Z][a-zA-Z0-9]{0,15}>", "g");
+// #2348: the self-closing render-tag imitation: <name …/> and the bare <name/>.
+// The kernel never emits it (its emitter is paired-form only); the model
+// truncates the shape mid-way. It is a COMPLETE unit — the '/' before '>'
+// terminates the element — so it dies in place. Two failure modes when treated
+// like other opens: (1) streaming handed it to the LONE_OPEN swallow state,
+// whose EOF rule drops an attrs-bearing unclosed opening's tail — measured:
+// 57-char input around one such tag emitted 3 chars, following prose lost;
+// (2) the BARE form matched no matcher anywhere (every open-side pattern
+// requires whitespace or '>' directly after the name, never '/'), so it rode
+// every fast path verbatim with zero warns. The slash is MANDATORY here so a
+// genuine unterminated opening (<name …>) still takes the swallow/hold path.
+const SELF_CLOSE = new RegExp("\x3c" + NAME + "(?:\\s[^<>]*)?\\/>");
 // A suffix of the buffer that could still grow into a render tag: either an
 // unterminated \x3c<name> … opening (attrs so far, no \x3e yet — the
 // mangled \x3c<name>=… form counts too, #2066), a short
@@ -153,7 +165,7 @@ const DEGEN_PAIR = new RegExp("\x3c" + NAME + "(?:\\s[^<>]*)?>\\s*m\\d{4,}\\s*\x
 // structure (over-cap-dropped openings, #644) and stay lossless. Held on the
 // small cap so a split unit can be stripped whole; a lone trailing ref with
 // no tag context is released at EOF, prose-safe.
-const PARTIAL_TAIL = new RegExp("(\x3c" + NAME + "\\s[^<>]*|\x3c" + NAME + "\\s*=\\s*[^<>]*|\x3c\\/" + NAME + "(?:\\s[^<>]{0,32})?|\x3c\\/?[aAcCpPiI]*|(?<![\\w>])\\s*" + REFS_RUN + "\\s*\x3c[^<>]*|(?<![\\w>])\\s*" + REFS_RUN + "|(?<![\\w>])m\\d{0,3})$");
+const PARTIAL_TAIL = new RegExp("(\x3c" + NAME + "\\s[^<>]*|\x3c" + NAME + "\\s*=\\s*[^<>]*|\x3c\\/" + NAME + "(?:\\s[^<>]{0,32})?|\x3c\\/?[aAcCpPiI]*(?:\/)?|(?<![\\w>])\\s*" + REFS_RUN + "\\s*\x3c[^<>]*|(?<![\\w>])\\s*" + REFS_RUN + "|(?<![\\w>])m\\d{0,3})$");
 // An unterminated render-tag opening at the end of a string: \x3c<name> plus
 // attrs, no \x3e — a truncated imitation, never prose (triggers use \x3cacp_).
 // The mangled \x3c<name>=… form counts too: once the `=` is there the tail is
@@ -390,6 +402,7 @@ export function stripAcpTags(text: string, dropToolCallEmission = false, request
     out = out
         .replace(new RegExp(PAIRED.source, "g"), "")
         .replace(DEGEN_PAIR, "")
+        .replace(new RegExp(SELF_CLOSE.source, "g"), "")
         .replace(new RegExp(LONE_OPEN.source, "g"), "")
         .replace(new RegExp(MANGLED_OPEN.source, "g"), "")
         .replace(new RegExp(LONE_CLOSE.source, "g"), "")
@@ -412,7 +425,10 @@ export function containsMarkerLineText(s: string): boolean {
 // contain anything that looks like a render tag (literal or JSON-escaped
 // \u003c form)? Callers use this to skip re-serializing chunks that need
 // no stripping, preserving byte-identical passthrough.
-const RENDER_TAG_DETECT = new RegExp("\x3c\\/?" + NAME + "(?=[\\s>])|\\\\u003c\\/?" + NAME + "(?=[\\s>\\\\])");
+// #2348: the self-closing alternatives match through the '/' only — a chunk
+// cut right after it is held by PARTIAL_TAIL instead, and over-engaging costs
+// one no-op pass while under-engaging forwards the tag raw.
+const RENDER_TAG_DETECT = new RegExp("\x3c\\/?" + NAME + "(?=[\\s>])|\\\\u003c\\/?" + NAME + "(?=[\\s>\\\\])|\x3c" + NAME + "\\s*\\/|\\\\u003c" + NAME + "\\s*\\/");
 export function containsRenderTagText(s: string): boolean {
     return RENDER_TAG_DETECT.test(s);
 }
@@ -742,7 +758,7 @@ export function mayStartBiliInternal(s: string): boolean {
 // those as residue made every bare-citation answer read as degenerate and fire
 // the one-shot retry (#732/#821) on a healthy turn. Tagged echoes need no help
 // here: their drop already sets sawStrippedEcho upstream.
-const TAG_PARTIAL_TAIL = new RegExp("(\x3c" + NAME + "\\s[^<>]*|\x3c\\/" + NAME + "(?:\\s[^<>]{0,32})?|\x3c\\/?[aAcCpPiI]*)$");
+const TAG_PARTIAL_TAIL = new RegExp("(\x3c" + NAME + "\\s[^<>]*|\x3c\\/" + NAME + "(?:\\s[^<>]{0,32})?|\x3c\\/?[aAcCpPiI]*(?:\/)?)$");
 export function isOrphanMarkupText(s: string): boolean {
     return RENDER_TAG_DETECT.test(s) || TAG_PARTIAL_TAIL.test(s) || containsMarkerLineText(s) || mayStartBiliInternal(s);
 }
@@ -953,6 +969,9 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                 return out;
             }
             const p = PAIRED.exec(buf);
+            // #2348: listed before o — at equal index the complete self-closing
+            // unit wins over LONE_OPEN's unclosed-opening interpretation.
+            const s = SELF_CLOSE.exec(buf);
             const o = LONE_OPEN.exec(buf);
             const c = LONE_CLOSE.exec(buf);
             // Orphan unit (#2023): only reached when no opening is live — a
@@ -968,7 +987,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
             // LONE_CLOSE on its own).
             const g = MANGLED_OPEN.exec(buf);
             let m: RegExpExecArray | null = null;
-            for (const cand of [p, o, c, r, g]) {
+            for (const cand of [p, s, o, c, r, g]) {
                 if (cand && (m === null || cand.index < m.index)) m = cand;
             }
             // An opening whose attribute list never terminates (see
