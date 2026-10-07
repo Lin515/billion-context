@@ -98,6 +98,7 @@ import { runCompressLoop, pickAdapter } from "./loop/index.js";
 import { computeAnthropicMessageMarks, stampAnthropicSystemCacheControl, anthropicToolsCarryCacheControl } from "./loop/cache-control.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
 import { ABSORB_INSTRUCTION_MARKER, containsToolCallXmlFragment } from "./loop/tag-echo-filter.js";
+import { wrapStreamWithRunawayGuard } from "./runaway-guard.js";
 import { isStrictReasoningEcho, modelIdOf, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput } from "./strict-echo.js";
 export { isStrictReasoningEcho, normalizeStrictEchoReasoning, normalizeStrictEchoResponsesInput };
 import { isFakeCompletion, injectFakeCompletionHint, maxFakeCompletionRetries, fakeBufCap } from "./fake-completion.js";
@@ -7006,6 +7007,13 @@ async function forward(
                 pluginBody = bufferToStream(resolvedBuf);
             }
             if (prepared.stream) {
+                // #2346: intrinsic runaway-enumeration terminator for the plugin-streamed
+                // body (the incident lane). Applied after any fake-completion buffering so
+                // both the live and replayed paths are guarded; byte-verbatim otherwise.
+                pluginBody = wrapStreamWithRunawayGuard(pluginBody, (v) => {
+                    log("error", `[${prepared.session.id}] runaway enumeration detected (${v.reason}; ${JSON.stringify(v.detail)}) — aborting upstream stream`);
+                    clientAbort.abort();
+                });
                 if (prepared.protocol === "responses") {
                     // #732/#821 applies to this pipe too (#871): the agent's own
                     // body, held here with its URL and headers, is re-issued once
@@ -7249,6 +7257,13 @@ async function forward(
             streamToRead = a;
             dumpRaw = dumpStreamToFile(b, opts.dumpSse, `${Date.now()}-${safeSessionId(prepared.session.id)}-raw.sse`);
         }
+        // #2346: intrinsic runaway-enumeration terminator for the streamed response —
+        // aborts the upstream and ends the stream cleanly when one message degenerates
+        // into an unbounded marker flood. Forwards every byte verbatim otherwise.
+        streamToRead = wrapStreamWithRunawayGuard(streamToRead, (v) => {
+            log("error", `[${prepared.session.id}] runaway enumeration detected (${v.reason}; ${JSON.stringify(v.detail)}) — aborting upstream stream`);
+            clientAbort.abort();
+        });
         // P1.1: wrap the rewriter loops in try/catch. If a rewriter throws
         // (decompress/search edge case, JSON.parse failure, fetch abort),
         // emitStreamError sends a protocol-appropriate error + finish so the
