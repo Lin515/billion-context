@@ -48,7 +48,7 @@ import {
     buildCompressHybridSystemPrompt,
     defaultPrompts,
 } from "acp-kernel";
-import type { CompressPromptSections, Prompts } from "acp-kernel";
+import type { CompressPromptSections, Prompts, SectionOverride } from "acp-kernel";
 import { log as loggerLog } from "./logger.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
 import { EXTERNAL_SUMMARY_NOTE } from "./external-summary-surface.js";
@@ -111,6 +111,12 @@ const NON_ACP_TAGS_SECTIONS = {
     hybrid: ["textProtocol", "functionTools"],
 } as const;
 
+/** #2335: resolve one lead block exactly like the kernel's applySectionOverrides
+ * does — null drops it, a string replaces it, undefined keeps the default. */
+function effectiveLeadSection(override: SectionOverride | undefined, fallback: string): string | null {
+    return override === null ? null : override ?? fallback;
+}
+
 export function buildAcpTagsOnlyPrompt(
     family: keyof typeof NON_ACP_TAGS_SECTIONS,
     prompts?: Prompts,
@@ -119,12 +125,21 @@ export function buildAcpTagsOnlyPrompt(
     const p = prompts ?? defaultPrompts;
     const overrides: CompressPromptSections = { ...(sections ?? {}) };
     for (const key of NON_ACP_TAGS_SECTIONS[family]) overrides[key] = null;
-    // The builder joins [philosophy, rules, ...sections] with "\n\n" and a null
-    // override omits its element entirely, so everything after the fixed prefix
-    // is exactly the acpTags section (kernel default or user override). The
-    // startsWith guard fails safe to "" (no injection) if the kernel ever changes
-    // the builder's prefix structure instead of slicing garbage into every prompt.
-    const prefix = `${p.compressPhilosophy}\n\n${p.howToCompressRules}\n\n`;
+    // The builder joins [philosophy?, rules?, ...sections] with "\n\n" and a null
+    // override omits its element entirely, so everything after the lead prefix is
+    // exactly the acpTags section (kernel default or user override). Since #2335
+    // the two lead blocks are pack-overridable — lean nulls philosophy and swaps
+    // rules — so the prefix must be computed from the EFFECTIVE sections; the old
+    // hardcoded prompts.* prefix made the guard fail for any trimming pack and
+    // silently dropped the whole ACP-TAGS prompt (injectTool=false + lean). The
+    // startsWith guard still fails safe to "" (no injection) if the kernel ever
+    // changes the builder's structure instead of slicing garbage into every prompt.
+    const lead: string[] = [];
+    for (const eff of [
+        effectiveLeadSection(overrides.philosophy, p.compressPhilosophy),
+        effectiveLeadSection(overrides.howToCompress, p.howToCompressRules),
+    ]) if (eff !== null) lead.push(eff);
+    const prefix = lead.length > 0 ? `${lead.join("\n\n")}\n\n` : "";
     const full = family === "hybrid"
         ? buildCompressHybridSystemPrompt(p, overrides)
         : buildCompressSystemPrompt(p, overrides);

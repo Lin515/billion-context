@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { defaultConfig, defaultPrompts } from "acp-kernel";
+import { defaultConfig, defaultPrompts, leanPack } from "acp-kernel";
 import { startServer } from "../src/server.ts";
 import { loadRoutes, type ProxyOptions } from "../src/config.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
@@ -38,6 +38,28 @@ test("buildAcpTagsOnlyPrompt: hybrid family extracts its own ACP-TAGS variant", 
 test("buildAcpTagsOnlyPrompt: user acpTags override wins verbatim; null disables", () => {
     assert.equal(buildAcpTagsOnlyPrompt("function", undefined, { acpTags: "CUSTOM-TAG-RULES" }), "CUSTOM-TAG-RULES");
     assert.equal(buildAcpTagsOnlyPrompt("hybrid", defaultPrompts, { acpTags: null }), "");
+});
+
+test("buildAcpTagsOnlyPrompt: survives packs overriding philosophy/howToCompress (#2335)", () => {
+    // #2335 made the two lead blocks tri-state sections. The old hardcoded
+    // prompts.* prefix then failed the startsWith guard for any trimming pack
+    // and the whole ACP-TAGS prompt vanished (injectTool=false + promptPack=lean).
+    const lean = leanPack.surface.promptSections!;
+    for (const family of ["function", "hybrid"] as const) {
+        const out = buildAcpTagsOnlyPrompt(family, defaultPrompts, lean);
+        assert.ok(out.length > 0, `${family}: tags-only prompt must not vanish under the lean pack`);
+        assert.ok(out.includes("Never echo the XML tags"), `${family}: lean acpTags rules delivered`);
+        assert.ok(!out.includes("Compression Philosophy"), `${family}: dropped philosophy stays out`);
+        assert.ok(!out.includes("Your summary is the ONLY record"), `${family}: swapped rules stay out`);
+    }
+    assert.equal(
+        buildAcpTagsOnlyPrompt("function", defaultPrompts, { philosophy: "P", howToCompress: "R", acpTags: "T" }),
+        "T",
+    );
+    assert.equal(
+        buildAcpTagsOnlyPrompt("function", defaultPrompts, { philosophy: null, howToCompress: null, acpTags: "T2" }),
+        "T2",
+    );
 });
 
 function close(server: http.Server): Promise<void> {
