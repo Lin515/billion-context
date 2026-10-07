@@ -284,6 +284,16 @@ export interface CompressionState {
    *  this set and keeps the clear "cannot be anchored" error. Optional for
    *  pre-feature persisted states. */
   hiddenOrphanRefs?: string[];
+  /** Padded refs (mNNNNN) proven UNREACHABLE (#2362): known in messageRefs but
+   *  backing no visible or folded message — the client rewrote or dropped those
+   *  messages (an edit reissues a new ref; a host-native compaction or bulk
+   *  history rewrite drops them outright), so no range citing them can ever
+   *  compress. Marked by applyCompression when a requested endpoint dangles;
+   *  a tombstone lifts automatically once the ref's message reappears in an
+   *  inbound view (processTurn / applyCompression). The refs themselves are
+   *  NEVER removed from messageRefs (Kernel Contract: ids are never re-issued).
+   *  Optional: pre-feature persisted states lack it. */
+  deadRefs?: string[];
   /** Exact inbound ids of the PREVIOUS processTurn pass (pre-pipeline,
    * converter-derived). Continuity signal for reconcile-live-ids (#462): an
    * id that is covered by a fold but was present in the prior pass is the

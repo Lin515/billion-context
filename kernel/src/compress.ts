@@ -412,6 +412,37 @@ export function createCore(ports: Ports = {}): CompressionCore {
       }
     }
 
+    // #2362: dead-ref tracking. A requested endpoint whose ref is known to
+    // this session but backs no visible or folded message is unreachable —
+    // the client rewrote or dropped that message. Record it so every later
+    // receipt and acp_status says DEAD instead of inviting another doomed
+    // retry (the self-amplifying failure loop). Tombstone-with-clear: refs
+    // are never removed from byRef (Kernel Contract), and a tombstone lifts
+    // once its message reappears in the view.
+    const visibleIdsForDead = new Set(input.messages.map((m) => m.id));
+    let deadRefs: string[] = (state.deadRefs ?? []).filter((ref) => {
+      const rawId = state.messageRefs.byRef[ref];
+      return !(rawId !== undefined && visibleIdsForDead.has(rawId));
+    });
+    const danglingBySpec = new Map<(typeof input.ranges)[number], string[]>();
+    for (const spec of input.ranges) {
+      const resolution = classifications.get(spec);
+      if (resolution === undefined || resolution.status !== "consumed") continue;
+      const dangling = danglingMessageRefs(state, input.messages, spec);
+      if (dangling.length === 0) continue;
+      danglingBySpec.set(spec, dangling);
+      for (const ref of dangling) {
+        if (!deadRefs.includes(ref)) deadRefs.push(ref);
+      }
+    }
+    if (deadRefs.length > 0) {
+      state.deadRefs = [...new Set(deadRefs)].sort(
+        (a, b) => Number(a.replace(/^m/, "")) - Number(b.replace(/^m/, "")),
+      );
+    } else {
+      state.deadRefs = undefined;
+    }
+
     let resolvableCount = 0;
     let unknownCount = 0;
     for (const resolution of classifications.values()) {
@@ -547,8 +578,8 @@ export function createCore(ports: Ports = {}): CompressionCore {
             }),
           ),
         ];
-        const danglingRefs = consumedRanges.flatMap((spec) =>
-          danglingMessageRefs(state, input.messages, spec),
+        const danglingRefs = consumedRanges.flatMap(
+          (spec) => danglingBySpec.get(spec) ?? [],
         );
         let gateMessage =
           resolvableCount === 0 &&
@@ -557,7 +588,7 @@ export function createCore(ports: Ports = {}): CompressionCore {
             ? `None of the ${input.ranges.length} requested range(s) resolved — every ref is unknown to this session. Refs are per-session snapshots, assigned once when a message is first rendered; no compress reassigns them, so unknown refs cannot come from an earlier compress in this session. They come from a different generation: a previous session instance (switching model or upstream mid-conversation starts a fresh session whose refs restart at m00001), the generation before a native-compaction rebase (which also resets refs to m00001), or a typo. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.`
             : consumedRanges.length > 0
               ? danglingRefs.length > 0
-                ? `Requested range(s) cannot be anchored (e.g. ${firstConsumed!.startRef}..${firstConsumed!.endRef}) — the refs exist in this session's ref map, but the messages they point to are no longer in the visible context and no active block covers them: the message content changed (or the message was filtered out of the view) and now carries a new ref, leaving your old refs dangling. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.`
+                ? `Requested range(s) cannot be anchored (e.g. ${firstConsumed!.startRef}..${firstConsumed!.endRef}): refs ${danglingRefs.join(", ")} are known to this session but no longer back any visible or folded message — the client rewrote or dropped those messages (an edit reissues a new ref; host-native compaction or a bulk history rewrite drops them outright), and no active block covers them. These refs are now recorded as DEAD: no range that includes them can compress now or later, whatever the neighbors. Do not retry this range in any form — run acp_status and target only the live refs it reports. ${diagnostics}`
                 : `Requested range(s) already compressed (e.g. ${firstConsumed!.startRef}..${firstConsumed!.endRef}) — ${coverDetail}${refoldDetail}. Nothing new to compress in that window. ${diagnostics} Continue the task, or run acp_status and target one of the CURRENT compressible ranges it reports.${tierActionHint(input.config, state)}`
               : countedRanges > 0
                 ? `Total compressible content too small (${totalRangeChars} chars across ${countedRanges} range(s), min ${input.config.compress.minCompressRange}). Combine more messages into your range(s) to meet the threshold.${refoldSuffix(okBlockedReasons)}`
@@ -588,8 +619,11 @@ export function createCore(ports: Ports = {}): CompressionCore {
           gateMessage += ` ${reversalNotes.join(" ")}`;
         }
 
+        // Rejected batches still carry their side effect: the dead-ref
+        // tombstones marked above (#2362). The clone differs from input.state
+        // ONLY in that field before the gate, so returning it is safe.
         return {
-          state: input.state,
+          state,
           result: {
             blocksCreated: 0,
             tokensCompressed: 0,
@@ -627,8 +661,11 @@ export function createCore(ports: Ports = {}): CompressionCore {
           continue;
         }
         const reasons = decision?.kind === "blocked" ? decision.reasons : [];
+        const dangling = danglingBySpec.get(spec);
         warnings.push(
-          `Skipped range (${spec.startRef}..${spec.endRef}) — already compressed${reasons.length > 0 ? `: ${reasons.join("; ")}` : " (messages consumed by existing block(s))"}; nothing to compress.`,
+          dangling && dangling.length > 0
+            ? `Skipped range (${spec.startRef}..${spec.endRef}) — its refs ${dangling.join(", ")} are DEAD (the client rewrote or dropped those messages); this range can never compress, do not retry it.`
+            : `Skipped range (${spec.startRef}..${spec.endRef}) — already compressed${reasons.length > 0 ? `: ${reasons.join("; ")}` : " (messages consumed by existing block(s))"}; nothing to compress.`,
         );
         continue;
       }
@@ -723,7 +760,18 @@ export function createCore(ports: Ports = {}): CompressionCore {
     // returned state carries THIS pass's snapshot for the next one.
     const inboundIds = input.messages.map((m) => m.id);
     const result = runPipeline(nodes, initial, ctx);
-    const state = { ...result.state, lastPassIds: inboundIds };
+    // #2362: lift dead-ref tombstones whose messages came back into the resent
+    // view (tombstone-with-clear — types.CompressionState.deadRefs).
+    let deadRefs = result.state.deadRefs;
+    if (deadRefs && deadRefs.length > 0) {
+      const inboundSet = new Set(inboundIds);
+      const kept = deadRefs.filter((ref) => {
+        const rawId = result.state.messageRefs.byRef[ref];
+        return !(rawId !== undefined && inboundSet.has(rawId));
+      });
+      deadRefs = kept.length > 0 ? kept : undefined;
+    }
+    const state = { ...result.state, lastPassIds: inboundIds, deadRefs };
     const ccrEffect = result.effects.ccr as CcrEffect | undefined;
     return {
       messages: result.messages,
@@ -2020,6 +2068,7 @@ function cloneState(state: CompressionState): CompressionState {
     hiddenOrphanRefs: state.hiddenOrphanRefs
       ? [...state.hiddenOrphanRefs]
       : undefined,
+    deadRefs: state.deadRefs ? [...state.deadRefs] : undefined,
   };
 }
 

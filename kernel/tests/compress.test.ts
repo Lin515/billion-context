@@ -893,7 +893,9 @@ test("drifted message content dangles the old ref — reported as unanchorable, 
   assert.equal(result.result.blocksCreated, 0);
   assert.match(result.result.errors[0]!, /cannot be anchored/);
   assert.match(result.result.errors[0]!, /no active block covers them/);
-  assert.match(result.result.errors[0]!, /leaving your old refs dangling/);
+  assert.match(result.result.errors[0]!, /recorded as DEAD/);
+  assert.match(result.result.errors[0]!, /Do not retry this range in any form/);
+  assert.deepEqual(result.state.deadRefs, ["m00005"]);
   assert.match(
     result.result.errors[0]!,
     /\[diagnostics: session highest ref=m00006, unknown ranges in request=0\/1, session history=0 compression\(s\), 0 block\(s\)\]/,
