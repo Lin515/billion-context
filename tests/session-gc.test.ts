@@ -538,6 +538,9 @@ test("records rawInputTokens per turn and persists it (#1082)", async () => {
         const upstreamPort = (upstream.address() as { port: number }).port;
         const opts: ProxyOptions = {
             port: 0,
+            proxy: "",
+            proxyFallback: { explicitDirect: true, globalSource: "direct" },
+            auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
             host: "127.0.0.1",
             upstream: "http://127.0.0.1",
             routes: { [`http://127.0.0.1:${upstreamPort}`]: { models: { "gpt-test": { context: 400_000 } } } },

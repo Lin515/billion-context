@@ -2,12 +2,16 @@ import type { CompressionCore, Config, CoreMessage } from "acp-kernel";
 import type { GooglePart } from "acp-kernel/wire";
 import type { Session } from "./session.js";
 import { effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
-import { executeProxyTool } from "./loop/core.js";
+import { executeProxyToolAsync } from "./loop/core.js";
 import { drainPendingRetrievals } from "./store.js";
-import type { RewriteCtx } from "./stream.js";
+import { runJsonRewriteAsync, type JsonToolCall, type RewriteCtx } from "./stream.js";
 import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, containsToolCallEmissionText, stripAcpTags } from "./loop/tag-echo-filter.js";
 
-export function rewriteGoogleJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
+export async function rewriteGoogleJsonResponseAsync(body: unknown, ctx: RewriteCtx, signal?: AbortSignal): Promise<unknown> {
+    return runJsonRewriteAsync(rewriteGoogleJsonSteps(body, ctx), async (call) => (await executeProxyToolAsync(call.name, call.args as Record<string, unknown>, ctx, call.id, undefined, signal)).text);
+}
+
+function* rewriteGoogleJsonSteps(body: unknown, ctx: RewriteCtx): Generator<JsonToolCall, unknown, string> {
     if (!body || typeof body !== "object") return body;
     const b = body as {
         candidates?: Array<{ content?: { role?: string; parts?: GooglePart[] }; finishReason?: string }>;
@@ -30,7 +34,7 @@ export function rewriteGoogleJsonResponse(body: unknown, ctx: RewriteCtx): unkno
         if (fc && typeof fc.name === "string" && isProxyToolFor(fc.name, ctx.session, ctx.config)) {
             converted = true;
             const args = fc.args !== null && typeof fc.args === "object" ? (fc.args as Record<string, unknown>) : {};
-            noteParts.push(executeProxyTool(fc.name, args, ctx, typeof fc.id === "string" ? fc.id : undefined).text);
+            noteParts.push(yield { name: fc.name, args, id: typeof fc.id === "string" ? fc.id : undefined });
             continue;
         }
         if (fc) sawReal = true;

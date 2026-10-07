@@ -134,7 +134,7 @@ async function fixture(terminalOutput: "full" | "empty" | "omitted" | "partial" 
     await once(upstream, "listening");
     const config = defaultConfig(200000);
     config.preserveRecentTokens = 0;
-    const opts: ProxyOptions = { host: "127.0.0.1", port: 0, upstream: "http://127.0.0.1", routes: {}, modelContextLimit: 200000, kernelConfig: config, compress: { injectTool: true, injectNudge: false }, promptCache: { routing: "auto" }, sessionHeader: "x-acp-session", log: true, logFile: path.join(tmp, "bili.log"), debug: false, passthrough: false, autoUpdate: false, mitm: { enabled: false, domains: [] } };
+    const opts: ProxyOptions = { host: "127.0.0.1", port: 0, upstream: "http://127.0.0.1", routes: {}, proxy: "", proxyMode: "direct", proxySource: "direct", proxyFallback: { explicitDirect: true, globalSource: "direct" }, auxProxyFallback: { explicitDirect: true, globalSource: "direct" }, modelContextLimit: 200000, kernelConfig: config, compress: { injectTool: true, injectNudge: false }, promptCache: { routing: "auto" }, sessionHeader: "x-acp-session", log: true, logFile: path.join(tmp, "bili.log"), debug: false, passthrough: false, autoUpdate: false, mitm: { enabled: false, domains: [] } };
     const proxy = await startServer(opts);
     await once(proxy, "listening");
     const proxyOrigin = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;

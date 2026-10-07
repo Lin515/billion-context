@@ -14,6 +14,7 @@ import { maxShrinkPerCompress } from "./fetch-util.js";
 import { compressResult, toolFail, type ProxyToolResult } from "./proxy-tool-result.js";
 import { attachSubagentSessions, subagentSessionNote, subagentSessionsOf, syncSubagentSessions } from "./subagent-sessions.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogates } from "./text-safe.js";
+import { applyConfiguredCompression } from "./external-summary-compress.js";
 
 export type RewriteCtx = {
     core: CompressionCore;
@@ -751,7 +752,31 @@ export function applyRanges(parsed: ReturnType<typeof parseCompressInput>, ctx: 
     }
 }
 
+export type JsonToolCall = { name: string; args: unknown; id?: string };
+
+export function runJsonRewrite(steps: Generator<JsonToolCall, unknown, string>, execute: (call: JsonToolCall) => string): unknown {
+    let step = steps.next();
+    while (!step.done) step = steps.next(execute(step.value));
+    return step.value;
+}
+
+export async function runJsonRewriteAsync(steps: Generator<JsonToolCall, unknown, string>, execute: (call: JsonToolCall) => Promise<string>): Promise<unknown> {
+    let step = steps.next();
+    while (!step.done) step = steps.next(await execute(step.value));
+    return step.value;
+}
+
 export function rewriteJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
+    return runJsonRewrite(rewriteJsonSteps(body, ctx), (call) => executeAnthropicProxyTool(call.name, call.args as Record<string, unknown>, ctx).text);
+}
+
+export async function rewriteJsonResponseAsync(body: unknown, ctx: RewriteCtx, signal?: AbortSignal): Promise<unknown> {
+    return runJsonRewriteAsync(rewriteJsonSteps(body, ctx), async (call) => call.name === COMPRESS_TOOL_NAME
+        ? (await applyConfiguredCompression(call.args, ctx, call.id, signal)).text
+        : executeAnthropicProxyTool(call.name, call.args as Record<string, unknown>, ctx).text);
+}
+
+function* rewriteJsonSteps(body: unknown, ctx: RewriteCtx): Generator<JsonToolCall, unknown, string> {
     if (!body || typeof body !== "object") return body;
     const b = body as { content?: unknown[]; stop_reason?: string };
     if (!Array.isArray(b.content)) return body;
@@ -759,11 +784,12 @@ export function rewriteJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
     let sawRealToolUse = false;
     const newContent: unknown[] = [];
     for (const block of b.content) {
-        const blk = block as { type?: string; name?: string; input?: unknown };
+        const blk = block as { type?: string; name?: string; input?: unknown; id?: string };
         if (blk.type === "tool_use" && typeof blk.name === "string" && isProxyToolFor(blk.name, ctx.session, ctx.config)) {
             converted = true;
             const args = (blk.input && typeof blk.input === "object" ? blk.input : {}) as Record<string, unknown>;
-            newContent.push({ type: "text", text: executeAnthropicProxyTool(blk.name, args, ctx).text });
+            const text = yield { name: blk.name, args, id: blk.id };
+            newContent.push({ type: "text", text });
         } else {
             if (blk.type === "tool_use") sawRealToolUse = true;
             newContent.push(block);

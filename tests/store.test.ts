@@ -261,6 +261,37 @@ test("flushAll retries a dirty content store after a transient write failure", a
     }
 });
 
+test("#2298: boot scan silently skips co-resident CCR content-store files (no invalid-record warns)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bili-ccr-bootskip-"));
+    try {
+        const writer = new SessionStore({ dir, debounceMs: 0 });
+        _setStoreForTest(writer);
+        const session = getSession(`ccr-bootskip-${Math.random().toString(36).slice(2)}`);
+        storeEffectiveCcr(session, { enabled: true, minToolTokens: 50 });
+        adoptContentStore(session, turnWith(ccrConfig()).contentStore);
+        assert.ok(writer.flushSync(session), "session + content-store envelope persisted");
+        const envelope = findEnvelope(dir);
+        assert.ok(envelope, "content-store envelope written next to the session JSON");
+
+        // Fresh-process simulation: a NEW store boots over the same tree —
+        // the pre-fix behavior logged one "skipping invalid record" warn per
+        // content-store file here (711 in the #2293 field report).
+        const logs: string[] = [];
+        const booted = new SessionStore({ dir, debounceMs: 0, log: (level, msg) => logs.push(`${level}:${msg}`) });
+        const loaded = await booted.boot();
+        assert.ok(loaded.has(session.id), "the session itself still loads at boot");
+        assert.equal(
+            logs.filter((line) => line.includes("skipping invalid record")).length,
+            0,
+            `no invalid-record warns for the co-resident content store: ${logs.join(" | ")}`,
+        );
+        assert.ok(!logs.some((line) => line.includes(".content-store.json")), "content-store file never surfaces in boot logs");
+    } finally {
+        _setStoreForTest(new SessionStore({ enabled: false }));
+        rmrf(dir);
+    }
+});
+
 // [#1343] Delivery-lifecycle coverage: every ack→loss path is observable
 // (counter + corrective note), never silent. Sessions are in-memory
 // (BILI_PERSIST=0); the durable ledger lives in session.metadata.

@@ -245,6 +245,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 720px) {
+    .topbar { flex-wrap: wrap; height: auto; min-height: 52px; padding: 10px 12px; gap: 10px; }
+    .topbar .actions { margin-left: auto; }
+    .fork-link { display: none; }
+    .nav { order: 3; flex: 1 1 100%; min-width: 0; }
     table.data th:nth-child(n + 6), table.data td:nth-child(n + 6) { display: none; }
     main { padding: 12px; }
     .kv { grid-template-columns: 1fr; row-gap: 3px; }
@@ -332,4 +336,16 @@ pre.tool-args, pre.tool-out { margin: 6px 0 0; padding: 8px; background: var(--b
 /* Log view rows (filtered mode): actual hits vs context / time-window lines. */
 .lm-ctx { opacity: 0.55; }
 .lm-hit { background: rgba(94, 164, 255, 0.14); border-radius: 3px; }
+.summary-settings { margin: 20px 0; padding: 18px 0; border-top: 1px solid var(--border); }
+.summary-settings h2 { font-size: 18px; margin: 0 0 14px; }
+.summary-target { min-width: 0; margin: 14px 0; padding: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.summary-target legend { max-width: 100%; overflow-wrap: anywhere; font-size: 13px; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; margin-bottom: 12px; }
+.summary-grid label { display: grid; gap: 5px; min-width: 0; font-size: 12px; }
+.summary-settings .field-input { width: 100%; min-width: 0; box-sizing: border-box; }
+.summary-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+.summary-creds { margin: 14px 0; }
+.summary-creds h4 { margin: 0 0 8px; font-size: 13px; }
+.summary-actions label:has(input[type="password"]) { display: grid; gap: 5px; flex: 1 1 200px; min-width: 0; font-size: 12px; }
+.summary-actions .btn { min-height: 32px; }
 `;

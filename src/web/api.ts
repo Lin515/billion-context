@@ -5,8 +5,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { configFile } from "../paths.js";
 import {
     allowDshCompactionState,
+    collectNamedProviders,
+    loadNamedProviders,
     normalizeLegacyAllowDshCompaction,
     parseCompressSettings,
+    parseNamedProviderRecipe,
     parseRouteEntry,
     parseUpstreamProxyMode,
     passthroughState,
@@ -17,6 +20,8 @@ import {
 } from "../config.js";
 import { log } from "../logger.js";
 import { validateHttpProxy } from "../upstream-proxy.js";
+import { SummaryCredentialStore } from "../external-summary-credentials.js";
+import { parseExternalSummaryChain, expandExternalSummaryChain } from "../external-summary-settings.js";
 
 type ConfigShape = Record<string, unknown> & {
     providers?: Record<string, unknown>;
@@ -83,6 +88,37 @@ function atomicWriteConfig(config: ConfigShape): void {
 export async function handleConfigGet(res: ServerResponse): Promise<void> {
     const upstream = readUpstreamSettings();
     const config = readConfig();
+    const rawCompress = config.compress && typeof config.compress === "object" ? config.compress as Record<string, unknown> : undefined;
+    const credentialStatus: Record<string, boolean> = {};
+    let hideInvalidSummary = false;
+    // Disabled chains skip strict target validation (an inert chain must not
+    // brick the config view), so surface credential status from the raw
+    // target list when the parsed chain carries no targets.
+    const rawCredentialRefs = (value: unknown): string[] => {
+        const targets = (value && typeof value === "object" ? (value as { targets?: unknown }).targets : undefined);
+        if (!Array.isArray(targets)) return [];
+        return [...new Set(targets.filter((item): item is { credentialRef: string } =>
+            !!item && typeof item === "object" && typeof (item as { credentialRef?: unknown }).credentialRef === "string")
+            .map((item) => item.credentialRef))];
+    };
+    if (rawCompress?.externalSummary !== undefined) {
+        try {
+            const chain = parseExternalSummaryChain(rawCompress.externalSummary);
+            // Credential status now comes from the named recipes the chain
+            // references (refs themselves carry no credential). Legacy
+            // inline-target files still surface their refs via the raw scan.
+            const refs = chain.targets.length > 0
+                ? Object.values(loadNamedProviders()).flatMap((recipe) => recipe.credentialRef !== undefined ? [`secret:${recipe.credentialRef}`] : recipe.apiKeyEnv !== undefined ? [`env:${recipe.apiKeyEnv}`] : [])
+                : rawCredentialRefs(rawCompress.externalSummary);
+            const store = new SummaryCredentialStore();
+            for (const ref of refs) credentialStatus[ref] = store.configured(ref);
+        } catch {
+            // A manually edited invalid block can contain inline credentials.
+            // Never echo that block through either structured or raw config GET.
+            config.compress = { ...rawCompress, externalSummary: { invalid: true } };
+            hideInvalidSummary = true;
+        }
+    }
     const parseError = configParseError();
     if (parseError) log("warn", `[acp-web] ${parseError} — showing empty view; PUT is blocked until fixed`);
     res.writeHead(200, { "content-type": "application/json" });
@@ -92,11 +128,25 @@ export async function handleConfigGet(res: ServerResponse): Promise<void> {
         upstreamProxy: upstream.proxy ?? null,
         upstreamProxyMode: upstream.mode,
         compress: config.compress ?? null,
+        externalSummaryCredentials: credentialStatus,
         passthrough: passthroughState(process.env),
         allowDshCompaction: allowDshCompactionState(process.env),
-        ...(existsSync(configFile()) ? { raw: readFileSync(configFile(), "utf8") } : {}),
+        ...(existsSync(configFile()) ? { raw: hideInvalidSummary ? JSON.stringify(config, null, 2) : readFileSync(configFile(), "utf8") } : {}),
         ...(parseError ? { parseError } : {}),
     }, null, 2));
+}
+
+export async function handleSummaryCredentialPut(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const raw = await readJsonBody(req);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return sendError(res, 400, "expected credential object");
+    const body = raw as Record<string, unknown>;
+    if (Object.keys(body).some((key) => key !== "name" && key !== "key") || typeof body.name !== "string"
+        || (body.key !== null && typeof body.key !== "string")) return sendError(res, 400, "expected name and key (null deletes)");
+    try {
+        new SummaryCredentialStore().set(body.name, body.key as string | null);
+    } catch { return sendError(res, 400, "could not save credential; check the name, key and private store permissions"); }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, configured: body.key !== null }));
 }
 
 export async function handleConfigPut(
@@ -146,6 +196,14 @@ export async function handleConfigPut(
                     return sendError(res, 400, `invalid provider entry for ${url || "(empty)"}: ${String(error)}`);
                 }
                 if (!url || !route) return sendError(res, 400, `invalid provider entry: ${url || "(empty)"}`);
+                // Named entries may carry a dialing recipe (baseUrl/api/...) —
+                // validate its shape at save time too, so the chain
+                // references below can only fail on dangling names.
+                if (!/^https?:\/\//.test(url)) {
+                    try { parseNamedProviderRecipe(value); } catch (error) {
+                        return sendError(res, 400, `invalid recipe on named provider "${url}": ${String(error)}`);
+                    }
+                }
                 try { validateHttpProxy(route.proxy, biliPort); } catch (error) { return sendError(res, 400, `invalid provider proxy for ${url}: ${String(error)}`); }
             }
         }
@@ -155,6 +213,21 @@ export async function handleConfigPut(
         }
         if (next.upstreamProxyMode !== undefined && (typeof next.upstreamProxyMode !== "string" || !["auto", "manual", "direct"].includes(next.upstreamProxyMode))) return sendError(res, 400, "upstreamProxyMode must be auto, manual, or direct");
         if (next.compress !== undefined && next.compress !== null && parseCompressSettings(next.compress) === undefined) return sendError(res, 400, "invalid compress settings");
+        // The chain references named recipes — validate the expansion against
+        // the providers table BEING SAVED (not the on-disk one), so a save
+        // cannot strand the config on a dangling reference. Only enabled
+        // chains are strict (a disabled chain is inert by contract).
+        if (next.compress !== undefined && next.compress !== null) {
+            const parsed = parseCompressSettings(next.compress);
+            if (parsed?.externalSummary?.enabled === true) {
+                const recipes = next.providers !== undefined && typeof next.providers === "object" && !Array.isArray(next.providers)
+                    ? collectNamedProviders(next.providers as Record<string, unknown>)
+                    : loadNamedProviders();
+                try { expandExternalSummaryChain(parsed.externalSummary, recipes); } catch (error) {
+                    return sendError(res, 400, `compress.externalSummary cannot be resolved: ${String(error)}`);
+                }
+            }
+        }
         if (next.passthrough !== undefined && next.passthrough !== null && typeof next.passthrough !== "boolean") return sendError(res, 400, "passthrough must be a boolean or null");
         if (next.passthrough === true && passthroughState(process.env).source === "env") return sendError(res, 409, "passthrough is forced by the ACP_PASSTHROUGH environment variable (or --passthrough flag); unset it and restart to change here");
         const fileDshFlag = ((next.dsh ?? {}) as Partial<DshFileSettings>).allowDshCompaction;

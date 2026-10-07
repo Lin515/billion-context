@@ -2538,14 +2538,14 @@ export function prepareGooseHome(env: NodeJS.ProcessEnv, origin: string, rewrite
             if (st.isSymbolicLink()) {
                 if (fs.readlinkSync(link) !== target) {
                     fs.rmSync(link);
-                    fs.symlinkSync(target, link);
+                    fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
                 }
             } else {
                 return undefined;
             }
         } catch {
             try {
-                fs.symlinkSync(target, link);
+                fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
             } catch {
                 return undefined;
             }
@@ -2831,6 +2831,11 @@ export function finalizeCodexHome(realHome: string, overlay: string, generatedFi
             try {
                 fs.rmSync(p, { recursive: true, force: true });
             } catch {}
+            // Cold-start thread records keep absolute rollout paths in the overlay.
+            if (st.isDirectory() && !linkOverlayEntry(realHome, overlay, entry)) {
+                ok = false;
+                console.error(`bili: could not relink ${p} after exit-time write-back — data is in ${realHome}, but recorded overlay paths may not resolve.`);
+            }
         } else {
             ok = false;
             console.error(`bili: could not merge ${p} into ${realHome} at exit — kept in the overlay, resolve manually.`);

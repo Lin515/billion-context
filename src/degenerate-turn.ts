@@ -35,3 +35,19 @@ export function degenerateTurnWarning(o: TurnOutcome): string | null {
         `— the agent receives an empty turn and may stall until nudged (#673)`
     );
 }
+
+// #2303: a terminal turn whose visible prose ENDS with a compression-draft
+// closing tag (the summary / analysis close forms) and no tool call is non-
+// converged even though it delivered text: the model wrote a handoff or
+// compression draft as prose — describing the tool call it was about to make —
+// instead of issuing it, most often after the upstream cut the final tool call
+// out of the step (observed: 149 silent stops across 70 sessions, DSH native).
+// The tag vocabulary is model-side learned convention (the kernel prompts
+// contain no such tags), so the matcher is deliberately narrow: exactly the two
+// closing tags seen in production, fully closed (truncated forms are a
+// different defect class — #1755/#2190 — and stay out of scope), case-
+// insensitive (#1731 case drift), trailing whitespace allowed.
+const DRAFT_CLOSE_TAIL = /\x3c\/(?:summary|analysis)\x3e\s*$/i;
+export function endsWithDraftClose(text: string): boolean {
+    return text.length > 0 && DRAFT_CLOSE_TAIL.test(text);
+}

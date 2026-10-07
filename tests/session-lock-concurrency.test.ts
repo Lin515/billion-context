@@ -63,6 +63,9 @@ test("#970: concurrent requests on the same session id forward concurrently (no 
     _resetSessionsForTest();
     const proxy = await startServer({
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: { [`http://127.0.0.1:${upstreamPort}`]: {} },

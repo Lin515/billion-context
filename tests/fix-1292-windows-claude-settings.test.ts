@@ -95,6 +95,8 @@ test("#1292 runLaunch claude simulated win32: --settings crosses the .cmd shim b
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-1292-home-"));
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
+    const prevClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const prevClientBin = process.env.BILI_CLIENT_BIN;
     const prevComspec = process.env.COMSPEC;
     const prevPlugin = process.env.BILI_LAUNCHER_PLUGIN;
     const prevExit = process.exit;
@@ -103,7 +105,8 @@ test("#1292 runLaunch claude simulated win32: --settings crosses the .cmd shim b
     const fakeClaude = path.join(home, "fake-claude.cmd");
     fs.writeFileSync(fakeClaude, "");
     process.env.HOME = home;
-    if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
+    process.env.USERPROFILE = home;
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, ".claude");
     process.env.BILI_CLIENT_BIN = fakeClaude;
     process.env.COMSPEC = "C:\\Windows\\System32\\cmd.exe";
     process.env.BILI_LAUNCHER_PLUGIN = "0";
@@ -160,10 +163,14 @@ test("#1292 runLaunch claude simulated win32: --settings crosses the .cmd shim b
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
+        if (prevClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfigDir;
         if (prevComspec === undefined) delete process.env.COMSPEC;
         else process.env.COMSPEC = prevComspec;
         if (prevPlugin === undefined) delete process.env.BILI_LAUNCHER_PLUGIN;
         else process.env.BILI_LAUNCHER_PLUGIN = prevPlugin;
+        if (prevClientBin === undefined) delete process.env.BILI_CLIENT_BIN;
+        else process.env.BILI_CLIENT_BIN = prevClientBin;
         if (prevXdgState === undefined) delete process.env.XDG_STATE_HOME;
         else process.env.XDG_STATE_HOME = prevXdgState;
         rmrf(home);
@@ -174,6 +181,8 @@ test("#1292 runLaunch claude posix: --settings stays inline JSON, no temp file c
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-1292-posix-"));
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
+    const prevClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const prevClientBin = process.env.BILI_CLIENT_BIN;
     const prevPlugin = process.env.BILI_LAUNCHER_PLUGIN;
     const prevExit = process.exit;
 
@@ -181,7 +190,8 @@ test("#1292 runLaunch claude posix: --settings stays inline JSON, no temp file c
     const fakeClaude = path.join(home, "fake-claude");
     fs.writeFileSync(fakeClaude, "");
     process.env.HOME = home;
-    if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
+    process.env.USERPROFILE = home;
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, ".claude");
     process.env.BILI_CLIENT_BIN = fakeClaude;
     process.env.BILI_LAUNCHER_PLUGIN = "0";
     process.exit = (() => undefined) as typeof process.exit;
@@ -224,8 +234,12 @@ test("#1292 runLaunch claude posix: --settings stays inline JSON, no temp file c
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
+        if (prevClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+        else process.env.CLAUDE_CONFIG_DIR = prevClaudeConfigDir;
         if (prevPlugin === undefined) delete process.env.BILI_LAUNCHER_PLUGIN;
         else process.env.BILI_LAUNCHER_PLUGIN = prevPlugin;
+        if (prevClientBin === undefined) delete process.env.BILI_CLIENT_BIN;
+        else process.env.BILI_CLIENT_BIN = prevClientBin;
         if (prevXdgState === undefined) delete process.env.XDG_STATE_HOME;
         else process.env.XDG_STATE_HOME = prevXdgState;
         rmrf(home);

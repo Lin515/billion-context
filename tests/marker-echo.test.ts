@@ -292,7 +292,7 @@ test("#913: withMarkerIntegrityNote drops the silence clause when markers are in
 });
 
 test("#888: withSummaryBudgetNote steers large/dense ranges into split multi-range calls", () => {
-    const out = withSummaryBudgetNote("Nudge: OVER-LIMIT T1");
+    const out = withSummaryBudgetNote("Nudge: OVER-LIMIT T1", false);
     assert.ok(out.startsWith("Nudge: OVER-LIMIT T1"), "input preserved verbatim");
     assert.ok(out.includes("Per-summary length budget"));
     assert.ok(out.includes("fails the WHOLE compress call"));
@@ -303,8 +303,8 @@ test("#888: withSummaryBudgetNote steers large/dense ranges into split multi-ran
 });
 
 test("#888: withSummaryBudgetNote is a byte-stable constant (prefix-cache safe)", () => {
-    const a = withSummaryBudgetNote("AAA");
-    const b = withSummaryBudgetNote("BBB");
+    const a = withSummaryBudgetNote("AAA", false);
+    const b = withSummaryBudgetNote("BBB", false);
     // Same suffix regardless of input → no dynamic values leak into the anchor.
     assert.equal(a.slice(3), b.slice(3));
 });

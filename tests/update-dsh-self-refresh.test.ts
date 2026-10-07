@@ -12,6 +12,7 @@ import path from "node:path";
 import type { Logger } from "../src/logger.ts";
 import type { DshPlan } from "../src/dsh-channel.ts";
 import { rmrf } from "./tmp-rm.ts";
+import { supportsDirectorySymlink } from "./platform-capabilities.ts";
 
 // LOCK_FILE is frozen at update.ts module load — redirect the cache tree
 // BEFORE importing it (same discipline as auto-restart.test.ts).
@@ -50,7 +51,11 @@ test("isDshProfileCopy: dsh profile layouts yes, everything else no", () => {
     }
 });
 
-test("isDshProfileCopy: follows symlinked copies into the profiles tree", () => {
+test("isDshProfileCopy: follows symlinked copies into the profiles tree", (t) => {
+    if (!supportsDirectorySymlink()) {
+        t.skip("directory symlinks require Developer Mode or junction support on this Windows host");
+        return;
+    }
     const base = fs.mkdtempSync(path.join(root, "classify-sym-"));
     try {
         // a pnpm-style profile: node_modules/billion-context is a symlink to
@@ -59,7 +64,7 @@ test("isDshProfileCopy: follows symlinked copies into the profiles tree", () => 
         const real = path.join(dshHome, "profiles", "web", "node_modules", ".pnpm", "billion-context@0.1.139", "node_modules", "billion-context");
         const link = path.join(dshHome, "profiles", "web", "node_modules", "billion-context");
         fs.mkdirSync(real, { recursive: true });
-        fs.symlinkSync(real, link, "dir");
+        fs.symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
         assert.equal(isDshProfileCopy(link, { DSH_HOME: dshHome }), true);
     } finally {
         rmrf(base);

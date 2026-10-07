@@ -7,7 +7,7 @@ import { lastCompressSuffix, withSessionLock, type Session } from "./session.js"
 import { extractResponsesTextTriggers, PROXY_TOOL_NAMES, MUTATING_PROXY_TOOLS } from "./compress-tool.js";
 import { log as loggerLog } from "./logger.js";
 import { drainPendingRetrievals } from "./store.js";
-import { executeProxyTool, buildVisibilityMarker } from "./loop/core.js";
+import { executeProxyToolAsync, buildVisibilityMarker } from "./loop/core.js";
 import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { mergeAdjacentConfigurationUpdates } from "./responses-tool-output.js";
 import { type ResponseInputItem } from "acp-kernel/wire";
@@ -19,6 +19,7 @@ import { safePrefix, safeSuffix } from "./text-safe.js";
 import { revoiceMidSystemDevelopers } from "./util.js";
 
 interface CompressLoopResponsesCtx {
+    signal?: AbortSignal;
     core: CompressionCore;
     config: Config;
     messages: CoreMessage[];
@@ -116,8 +117,8 @@ async function surfaceProxyJson(
         let result: string;
         try {
             const toolResult = mutating
-                ? await withSessionLock(ctx.session, () => executeProxyTool(call.name, args, ctx, call.callId, rawArgs))
-                : executeProxyTool(call.name, args, ctx, call.callId, rawArgs);
+                ? await withSessionLock(ctx.session, () => executeProxyToolAsync(call.name, args, ctx, call.callId, rawArgs, ctx.signal))
+                : await executeProxyToolAsync(call.name, args, ctx, call.callId, rawArgs, ctx.signal);
             result = toolResult.text;
             ctx.log(`[acp-proxy: responses JSON ${call.name}${mutating ? "" : " (read-only)"} → ${result.slice(0, 120).replace(/\n/g, " ")}]`);
         } catch (e) {
@@ -182,7 +183,7 @@ export async function compressLoopResponsesJson(
                 loggerLog("warn", `[acp-compress-args] ${call.name} JSON.parse failed: ${String(error)} (len=${call.arguments.length}, head=${safePrefix(call.arguments, 200)}, tail=${safeSuffix(call.arguments, 200)})`);
                 rawArgs = call.arguments;
             }
-            const toolResult = await withSessionLock(ctx.session, () => executeProxyTool(call.name, args, ctx, call.callId, rawArgs));
+                const toolResult = await withSessionLock(ctx.session, () => executeProxyToolAsync(call.name, args, ctx, call.callId, rawArgs, ctx.signal));
             ctx.log(`[acp-proxy: responses JSON ${call.name} → ${toolResult.text.slice(0, 120).replace(/\n/g, " ")}]`);
             if (ctx.visibilityMarkers !== false) inputItems.push({ type: "message", role: "developer", content: buildVisibilityMarker(call.name, toolResult.text) });
         }

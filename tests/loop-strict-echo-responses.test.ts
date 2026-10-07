@@ -78,6 +78,9 @@ async function startHarnessLoop(handler: (bodyText: string, res: http.ServerResp
     await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         port: 0,
         host: "127.0.0.1",
         upstream: `http://127.0.0.1:${upstreamPort}`,

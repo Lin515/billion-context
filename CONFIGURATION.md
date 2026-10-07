@@ -1053,6 +1053,42 @@ A key that is not a URL (e.g. `"claude-bridge"`) is a **named** entry. On its ow
 
 Compression behaviour is controlled by the `compress` block, which can appear at three levels. They merge **per-field, deepest wins**: a field set at a deeper level overrides the same field higher up, but an *unset* field at a deeper level never clears a value set higher up. In other words, the child covers the parent field-by-field — it never replaces the whole object.
 
+### Shared external summary service
+
+The optional `compress.externalSummary` block sends compression summaries to one or more separately configured models. It lives at all three `compress` levels like every other field, with whole-chain semantics: a chain set at a deeper level (provider or model) **replaces** the entire chain above it — there is no per-target or per-budget sub-merge, exactly like `tiers`. It is disabled unless `enabled` is `true`; when enabled, targets are tried in order and a failed or unusable target falls through to the next one. The main request provider, model, and authorization are never reused for these calls. This feature changes the compression tool contract so `summary` is an optional non-authoritative hint; the proxy keeps the original messages recoverable and commits only a validated returned summary.
+
+Targets are **references into the `providers` table**: each entry is the string `"provider/model"`, where `provider` is a *named provider recipe* (a non-URL `providers` entry carrying dial fields) and `model` is a key of its `models` map. The endpoint, protocol, and credential are derived from the recipe — no URLs are repeated per target:
+
+```json
+{
+  "providers": {
+    "glm": {
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "api": "openai",
+      "apiKeyEnv": "GLM_API_KEY",
+      "models": { "glm-4.9-flash": { "outputTokens": 4096 } }
+    },
+    "claude": {
+      "baseUrl": "https://api.anthropic.com",
+      "api": "anthropic",
+      "credentialRef": "primary",
+      "models": { "claude-haiku-4.5": {} }
+    }
+  },
+  "compress": {
+    "externalSummary": {
+      "enabled": true,
+      "targets": ["glm/glm-4.9-flash", "claude/claude-haiku-4.5"],
+      "budget": { "totalTimeoutMs": 50000, "targetTimeoutMs": 25000, "maxSummaryBytes": 65536 }
+    }
+  }
+}
+```
+
+A recipe carries: `baseUrl` (HTTPS; loopback HTTP allowed for local development; no embedded credentials, proxy-recursion paths, or arbitrary query parameters), `api` (one of `openai` | `anthropic` | `responses` | `google`; selects the wire protocol and derives the request path from `baseUrl`), exactly one credential reference — `apiKeyEnv: "VAR_NAME"` (an environment variable read at call time) or `credentialRef: "NAME"` (a value stored via the Web UI) — and a `models` map whose per-model fields are `contextWindow` (default 128000), `outputTokens` (default `min(8192, window/4)`), and `stream` (default false). Recipes can also be split into `recipe`/`bind` routing form like URL entries; a named entry is routing-inert unless bound.
+
+Up to 16 targets per chain are supported. Saving an enabled chain through the Web API validates that every reference resolves (unknown provider or model → HTTP 400). At runtime an unresolvable reference is logged once and disables the chain until fixed — it never falls back to summarizing with the main model. `secret:` values are stored separately from the main JSON configuration in the private `billion-context.json.summary-credentials.json` file and are never returned by the configuration API. On Windows, protect this file and its parent directory with an administrator-only ACL; stale `.lock` files require manual removal after confirming no proxy process is writing the store. The total budget is shared across all targets and compression entry points, and cancellation or session-state changes discard generated results without folding.
+
 The three levels, from broadest to most specific:
 
 1. **Global** — a top-level `"compress": { … }` key. Applies to every request. This is the only level where the `injectTool` / `injectNudge` toggles are honoured.

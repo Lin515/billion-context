@@ -11,9 +11,10 @@ import { cloneStoreForRefs } from "./store.js";
 import { acquireInFlight, createSession, getSession, publishForkSession, diagnoseSuccessWithoutUsage, effectiveConfig, findSessionByCanonicalId, listSessions, markCompactionBoundary, markDirty, peekSession, releaseInFlight, statusInputBaseline, withSessionLock, type Session } from "./session.js";
 import { clientConversationHeader } from "./session-id.js";
 import { ABSORB_TOOL_NAME, BILI_ACP_TOOLS_ANTHROPIC, BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, BILI_ACP_TOOLS_OPENAI, BILI_ACP_TOOLS_OPENAI_NO_RANGE, BILI_ACP_TOOLS_RESPONSES_NO_RANGE, PROXY_TOOL_NAMES, RETRIEVE_TOOL_NAME, RULE_TOOL, RULE_TOOL_NAME, RULE_TOOL_OPENAI, RULE_TOOL_RESPONSES, SEARCH_CONTEXT_TOOL_NAME, absorbToolsFor, retrieveToolsFor } from "./compress-tool.js";
+import { externalSummaryEnabled, withExternalSummaryTools } from "./external-summary-surface.js";
 import { absorbEnabled, effectiveAbsorbConfig, isProxyToolFor } from "./absorb.js";
 import { effectiveRulesEnabled, rulesEnabled } from "./rules-feature.js";
-import { executeProxyTool } from "./loop/core.js";
+import { executeProxyToolAsync } from "./loop/core.js";
 import type { ProxyToolResult } from "./proxy-tool-result.js";
 import { normalizeSseLineEndings } from "./sse-util.js";
 import { composeStreamFilters, containsBiliInternalText, containsEchoResidue, containsMarkerLineText, containsRenderTagText, containsToolCallEmissionText, containsToolCallXmlFragment, createBiliArtifactFilter, createIdentityStreamFilter, createMarkerLineFilter, createTagEchoFilter, isOrphanMarkupText, mayStartBiliInternal, mayStartDegenerateRenderTag, mayStartMarkerLine, mayStartRenderTag, mayStartToolCallEmission, stripAcpTags, stripAnthropicText, stripOpenaiChatText, stripResponsesText, type TagEchoFilter } from "./loop/tag-echo-filter.js";
@@ -21,7 +22,7 @@ import { log as loggerLog } from "./logger.js";
 import { ccrEnabled, ccrLoopConfig, contentStoreOf, retrieveToolName } from "./store.js";
 import { imageUsageSuffix } from "./image-compress.js";
 import { emitStreamError, emitUpstreamTruncation } from "./stream-error.js";
-import { degenerateTurnWarning } from "./degenerate-turn.js";
+import { degenerateTurnWarning, endsWithDraftClose } from "./degenerate-turn.js";
 import { PANEL_BOX_FOOTER } from "./acp-panel.js";
 import { describeAdvisory, getAdvisoryState } from "./advisory.js";
 import { describeUpdateReady, getUpdateVisibility } from "./update-notes.js";
@@ -738,13 +739,14 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
     // CCR (#1345 plugin policy = base block verbatim) — same conservative #1192
     // rule as acp_retrieve above. CCR-off manifests serve the no-range variants so
     // a registered agent never sees range fields execution would refuse.
-    const acpAnthropic = ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE;
-    const acpOpenai = ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE;
+    const externalSummary = externalSummaryEnabled(config);
+    const acpAnthropic = withExternalSummaryTools(ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, externalSummary);
+    const acpOpenai = withExternalSummaryTools(ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE, externalSummary);
     // Responses wire: plugin mode structurally disarms CCR there (#1271 —
     // PLUGIN_CCR_WIRES excludes it), so range restore can never execute for a
     // registered agent on that wire — always the no-range variant, mirroring
     // how ccrTools above is never spread into the responses array.
-    const acpResponses = BILI_ACP_TOOLS_RESPONSES_NO_RANGE;
+    const acpResponses = withExternalSummaryTools(BILI_ACP_TOOLS_RESPONSES_NO_RANGE, externalSummary);
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
         ok: true,
@@ -761,7 +763,7 @@ export function handlePluginManifest(res: import("node:http").ServerResponse, co
         toolEndpoint: "/__bili/plugin/tool",
         statusEndpoint: "/__bili/plugin/status",
         runtimeInfoEndpoint: "/__bili/plugin/runtime-info",
-        capabilities: { fork: { protocolVersion: 1, endpoint: "/__bili/plugin/fork", snapshotEndpoint: "/__bili/plugin/snapshot" } },
+        capabilities: { ...(externalSummary ? { externalSummary: { enabled: true, summaryOptional: true, submittedSummary: "hint" } } : {}), fork: { protocolVersion: 1, endpoint: "/__bili/plugin/fork", snapshotEndpoint: "/__bili/plugin/snapshot" } },
     }));
 }
 
@@ -772,6 +774,7 @@ export type PluginToolDeps = {
     // Browser-reachable origin of THIS proxy (http://host:port) for the human-facing
     // Web UI deep links inside panels/reports; absent in test harnesses/embeds.
     webOrigin?: string;
+    signal?: AbortSignal;
 };
 
 /** Reverse-lookup the conversation id bound to a session id. #656: the
@@ -1490,7 +1493,7 @@ export async function handlePluginTool(
             const creditBefore = session.stats.compressCreditTokens ?? 0;
             const compressBefore = session.lastCompress;
             const pendingBefore = new Set(session.pendingRetrievals.map((p) => p.ref));
-            const toolResult = executeProxyTool(tool, args, {
+            const toolResult = await executeProxyToolAsync(tool, args, {
                 core: deps.core,
                 // #833: run proxy tools under the session's last resolved Config
                 // (same values the wire path used), not the base kernelConfig.
@@ -1498,7 +1501,7 @@ export async function handlePluginTool(
                 messages,
                 session,
                 log: (m) => deps.log("info", `[${session.id}] [plugin] ${m}`),
-            }, callId);
+            }, callId, undefined, deps.signal);
             const creditDelta = (session.stats.compressCreditTokens ?? 0) - creditBefore;
             const restoredInjections = session.pendingRetrievals.filter((p) => !pendingBefore.has(p.ref));
             // The string tool protocol has distinct success headers for whole/derived and range restores.
@@ -1860,9 +1863,16 @@ export async function pipePluginChatWithStrip(
      *  re-send on a degenerate completion — one re-issue per request, total. */
     const retryEmptyTurn = async (reason: string | undefined): Promise<boolean> => {
         if (refetch === undefined || truncationRetried) return false;
+        // #2303: a terminal turn whose visible prose ends with a compression-draft
+        // closing tag and no tool call is non-converged even though it has visible
+        // text — the model wrote a handoff/compression draft in prose instead of
+        // issuing the action it described (149 silent stops / 70 sessions, DSH
+        // native). Treat it like the empty-turn shape below so at worst the client
+        // gets one extra continuation instead of losing the whole turn.
+        const draftTail = visibleTextChars > 0 && !sawToolUse && endsWithDraftClose(proseAcc);
         // Markup released from a held span carries nothing the host can act on:
         // an unclosed render tag stalls the turn exactly like an empty one.
-        if (visibleTextChars > releasedMarkupChars || sawToolUse) return false;
+        if (!draftTail && (visibleTextChars > releasedMarkupChars || sawToolUse)) return false;
         if (reason === undefined || !CLEAN_TURN_REASONS.has(reason)) return false;
         if (res.destroyed || res.writableEnded) return false;
         if (degenerateRetried) {
@@ -1877,10 +1887,13 @@ export async function pipePluginChatWithStrip(
         // A turn the model left genuinely bare — no thought, no stripped echo,
         // no released markup — is the upstream's own empty answer, not a stall:
         // re-issuing it double-bills an empty completion (#732/#821 keep the
-        // same boundary in the compress loop).
-        if (!sawThinking && !sawStrippedEcho && releasedMarkupChars === 0) return false;
+        // same boundary in the compress loop). A draft-tail turn is NOT bare:
+        // it delivered a full handoff draft, which is precisely the stall signal.
+        if (!sawThinking && !sawStrippedEcho && releasedMarkupChars === 0 && !draftTail) return false;
         degenerateRetried = true;
-        log?.("[plugin] degenerate terminal turn (no usable output); retrying once with a continuation nudge (#732/#821)");
+        log?.(draftTail
+            ? "[plugin] terminal turn ends with a compression-draft closing tag and no tool call; retrying once with a continuation nudge (#2303)"
+            : "[plugin] degenerate terminal turn (no usable output); retrying once with a continuation nudge (#732/#821)");
         let next: ReadableStream<Uint8Array> | null = null;
         try {
             next = await refetch();
@@ -2953,16 +2966,22 @@ export async function pipePluginResponsesWithStrip(
     const retryEmptyTurn = async (status: string | undefined): Promise<boolean> => {
         // truncationRetried: one re-issue per request, total — see the chat-pipe twin.
         if (degenerateRetried || truncationRetried || refetch === undefined) return false;
-        if (visibleTextChars > 0 || heldVisibleChars > 0 || sawFunctionCall) return false;
+        // #2303: same shape as the chat-pipe twin — visible prose ending in a
+        // compression-draft closing tag with no function call is non-converged.
+        const draftTail = (visibleTextChars > 0 || heldVisibleChars > 0) && !sawFunctionCall && endsWithDraftClose(proseAcc);
+        if (!draftTail && (visibleTextChars > 0 || heldVisibleChars > 0 || sawFunctionCall)) return false;
         if (status !== "completed") return false;
         if (res.destroyed || res.writableEnded) return false;
         // A turn the model left genuinely bare — no reasoning, no stripped
         // echo — is the upstream's own empty answer, not a stall: re-issuing it
         // double-bills an empty completion (#732/#821 keep the same boundary in
-        // the compress loop).
-        if (!sawReasoning && !sawStrippedEcho) return false;
+        // the compress loop). A draft-tail turn delivered a full handoff draft:
+        // precisely the stall signal.
+        if (!sawReasoning && !sawStrippedEcho && !draftTail) return false;
         degenerateRetried = true;
-        log?.("[plugin] degenerate terminal turn (no visible output); retrying once with a continuation nudge (#732/#821)");
+        log?.(draftTail
+            ? "[plugin] terminal turn ends with a compression-draft closing tag and no function call; retrying once with a continuation nudge (#2303)"
+            : "[plugin] degenerate terminal turn (no visible output); retrying once with a continuation nudge (#732/#821)");
         let next: ReadableStream<Uint8Array> | null = null;
         try {
             next = await refetch();

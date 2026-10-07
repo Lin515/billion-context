@@ -386,6 +386,9 @@ async function startRig(opts?: { modelContextLimit?: number; compressModelContex
     _resetSessionsForTest();
     const proxy = await startServer({
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: { [`http://127.0.0.1:${upstreamPort}`]: opts?.routeModels ? { models: opts.routeModels } : {} },

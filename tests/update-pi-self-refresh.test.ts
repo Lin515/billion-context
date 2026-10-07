@@ -14,6 +14,7 @@ import path from "node:path";
 import type { Logger } from "../src/logger.ts";
 import type { PiPlan } from "../src/pi-channel.ts";
 import { rmrf } from "./tmp-rm.ts";
+import { supportsDirectorySymlink } from "./platform-capabilities.ts";
 
 // LOCK_FILE is frozen at update.ts module load — redirect the cache tree
 // BEFORE importing it (same discipline as update-dsh-self-refresh.test.ts).
@@ -86,14 +87,18 @@ test("isPiNpmCopy: pi npm layouts yes, everything else no", () => {
     }
 });
 
-test("isPiNpmCopy: follows a symlinked copy into the pi npm tree", () => {
+test("isPiNpmCopy: follows a symlinked copy into the pi npm tree", (t) => {
+    if (!supportsDirectorySymlink()) {
+        t.skip("directory symlinks require Developer Mode or junction support on this Windows host");
+        return;
+    }
     const base = fs.mkdtempSync(path.join(root, "classify-sym-"));
     try {
         const piHome = path.join(base, "pi");
         const real = path.join(piHome, "npm", "node_modules", ".store", "billion-context");
         const link = path.join(piHome, "npm", "node_modules", "billion-context");
         fs.mkdirSync(real, { recursive: true });
-        fs.symlinkSync(real, link, "dir");
+        fs.symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
         assert.equal(isPiNpmCopy(link, { PI_CODING_AGENT_DIR: piHome }), true);
     } finally {
         rmrf(base);

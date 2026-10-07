@@ -1056,6 +1056,42 @@
 
 压缩行为由 `compress` 块控制，它可以出现在三个层级。它们按**逐字段、最深层胜出**的方式合并：在更深层设置的字段会覆盖上层同名字段，但更深层*未设置*的字段**永远不会**清除上层已设置的值。换言之，子级按字段覆盖父级 —— 它绝不是整体替换对象。
 
+### 共享外部摘要服务
+
+可选的 `compress.externalSummary` 会把压缩摘要交给一个或多个独立配置的模型。它与其余 `compress` 字段一样存在于全部三个层级，采用整链替换语义：在更深层级（provider 或 model）设置的链会**整体替换**上层链，不做按目标或按预算的子字段合并，与 `tiers` 完全一致。只有 `enabled` 为 `true` 时才启用；启用后按顺序调用目标，目标失败或返回不可用摘要时继续使用下一个目标。摘要请求不会复用主请求的 provider、模型或认证信息。启用该功能后，压缩工具中的 `summary` 变为可选的、非权威提示；代理仍保留原文可恢复，只提交通过校验的外部摘要。
+
+目标是**对 `providers` 表的引用**：每个条目是字符串 `"provider/model"`，其中 `provider` 是一张*具名拨号配方*（`providers` 表中带拨号字段的非 URL 条目），`model` 是其 `models` 表中的一个键。端点、协议与凭据均由配方推导，不需要在每个目标里重复 URL：
+
+```json
+{
+  "providers": {
+    "glm": {
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "api": "openai",
+      "apiKeyEnv": "GLM_API_KEY",
+      "models": { "glm-4.9-flash": { "outputTokens": 4096 } }
+    },
+    "claude": {
+      "baseUrl": "https://api.anthropic.com",
+      "api": "anthropic",
+      "credentialRef": "primary",
+      "models": { "claude-haiku-4.5": {} }
+    }
+  },
+  "compress": {
+    "externalSummary": {
+      "enabled": true,
+      "targets": ["glm/glm-4.9-flash", "claude/claude-haiku-4.5"],
+      "budget": { "totalTimeoutMs": 50000, "targetTimeoutMs": 25000, "maxSummaryBytes": 65536 }
+    }
+  }
+}
+```
+
+配方包含：`baseUrl`（必须 HTTPS，本地开发可用回环 HTTP；拒绝内嵌凭据、代理递归路径与任意 query 参数）；`api`（`openai` | `anthropic` | `responses` | `google` 四选一，决定线上协议并从 `baseUrl` 推导请求路径）；恰好一个凭据引用 —— `apiKeyEnv: "变量名"`（调用时读环境变量）或 `credentialRef: "名字"`（通过 Web UI 存储的值）；以及 `models` 表，每个模型可设 `contextWindow`（默认 128000）、`outputTokens`（默认 `min(8192, 窗口/4)`）、`stream`（默认 false）。配方也可以像 URL 条目一样拆成 `recipe`/`bind` 路由形态；具名条目未绑定时对路由不生效（routing-inert）。
+
+每条链最多 16 个目标。通过 Web API 保存启用的链时会校验每个引用可解析（未知 provider 或 model → HTTP 400）。运行时遇到不可解析的引用会记录一次警告并禁用整条链直至修复 —— 绝不会回退用主模型写摘要。`secret:` 值单独存储在私有的 `billion-context.json.summary-credentials.json` 文件中，不随主 JSON 配置下发，配置 API 也不会返回。Windows 上请用仅管理员的 ACL 保护该文件及其父目录；确认没有代理进程在写存储后，残留的 `.lock` 文件需手工删除。总预算由全部目标与压缩入口共享；取消或会话状态变化会丢弃已生成但未落盘的结果。
+
 三个层级，从最宽泛到最具体：
 
 1. **全局（Global）** —— 顶层 `"compress": { … }` 键。应用于每个请求。这是唯一会生效 `injectTool` / `injectNudge` 开关的层级。

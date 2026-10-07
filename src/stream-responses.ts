@@ -1,7 +1,8 @@
 import type { CompressionCore, Config, CoreMessage } from "acp-kernel";
 import type { Session } from "./session.js";
 import { COMPRESS_TOOL_NAME, parseCompressInput } from "./compress-tool.js";
-import { applyRanges, type RewriteCtx } from "./stream.js";
+import { applyRanges, runJsonRewrite, runJsonRewriteAsync, type JsonToolCall, type RewriteCtx } from "./stream.js";
+import { applyConfiguredCompression } from "./external-summary-compress.js";
 import { effectiveAbsorbConfig } from "./absorb.js";
 import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText, containsToolCallEmissionText, stripResponsesText } from "./loop/tag-echo-filter.js";
 
@@ -13,6 +14,14 @@ import { containsBiliInternalText, containsMarkerLineText, containsRenderTagText
  * correct output_item.added → delta → done sequence); it has been removed.
  */
 export function rewriteResponsesJsonResponse(body: unknown, ctx: RewriteCtx): unknown {
+    return runJsonRewrite(rewriteResponsesJsonSteps(body, ctx), (call) => applyRanges(parseCompressInput(call.args, call.id), ctx).text);
+}
+
+export async function rewriteResponsesJsonResponseAsync(body: unknown, ctx: RewriteCtx, signal?: AbortSignal): Promise<unknown> {
+    return runJsonRewriteAsync(rewriteResponsesJsonSteps(body, ctx), async (call) => (await applyConfiguredCompression(call.args, ctx, call.id, signal)).text);
+}
+
+function* rewriteResponsesJsonSteps(body: unknown, ctx: RewriteCtx): Generator<JsonToolCall, unknown, string> {
     if (!body || typeof body !== "object") return body;
     const b = body as {
         output?: Array<Record<string, unknown>>;
@@ -41,7 +50,7 @@ export function rewriteResponsesJsonResponse(body: unknown, ctx: RewriteCtx): un
     for (const item of b.output) {
         if (item.type === "function_call" && item.name === COMPRESS_TOOL_NAME) {
             converted = true;
-            noteParts.push(applyRanges(parseCompressInput(String(item.arguments ?? "")), ctx).text);
+            noteParts.push(yield { name: COMPRESS_TOOL_NAME, args: String(item.arguments ?? ""), id: typeof item.call_id === "string" ? item.call_id : undefined });
         } else {
             if (item.type === "function_call") sawReal = true;
             keep.push(item);

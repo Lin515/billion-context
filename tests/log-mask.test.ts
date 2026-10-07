@@ -207,6 +207,7 @@ test("proxy debug logs: no credentials, no non-public host in ANY log line (#255
             port: 0,
             host: "127.0.0.1",
             upstream: "http://127.0.0.1",
+            proxy: "",
             routes: {
                 [`http://127.0.0.1:${upstreamPort}`]: { models: { "gpt-test": { context: 400_000 } } },
             },
@@ -226,7 +227,8 @@ autoRestartOnUpdate: false,
             streamErrorShape: "protocol",
             passthroughSource: null,
             updateTag: "latest",
-mitm: { enabled: false, domains: [] },
+            mitm: { enabled: false, domains: [] },
+            proxyFallback: { explicitDirect: true, globalSource: "direct" },
         };
         proxy = await startServer(opts);
         await once(proxy, "listening");
@@ -291,6 +293,7 @@ test("proxy error log: connection failure to non-public upstream leaks nothing (
             port: 0,
             host: "127.0.0.1",
             upstream: "http://127.0.0.1",
+            proxy: "",
             routes: {
                 "http://127.0.0.1:59999": { models: { "gpt-test": { context: 400_000 } } },
             },
@@ -358,6 +361,7 @@ test("mitm CONNECT tunnel failure: err.message host scrubbed from log (#255)", a
             port: 0,
             host: "127.0.0.1",
             upstream: "http://127.0.0.1",
+            proxy: "",
             routes: {
                 "http://127.0.0.1:1": { models: { "gpt-test": { context: 400_000 } } },
             },
@@ -377,7 +381,9 @@ autoRestartOnUpdate: false,
             streamErrorShape: "protocol",
             passthroughSource: null,
             updateTag: "latest",
-mitm: { enabled: true, domains: [] },
+            mitm: { enabled: true, domains: [] },
+            proxyFallback: { explicitDirect: true, globalSource: "direct" },
+            auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         };
         proxy = await startServer(opts);
         await once(proxy, "listening");
@@ -424,6 +430,7 @@ test("ws upgrade rejection: host header scrubbed from log (#255)", async () => {
             port: 0,
             host: "127.0.0.1",
             upstream: "http://127.0.0.1",
+            proxy: "",
             routes: {
                 "http://127.0.0.1:59999": { models: { "gpt-test": { context: 400_000 } } },
             },

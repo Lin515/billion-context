@@ -10,7 +10,7 @@ import { DEFAULT_STRIP_IMAGES_KEEP_RECENT, applyCompressSettings, resolveAbsorbS
 import { dropCompressReasoning, type CompressReasoningConfig } from "./reasoning-drop.js";
 import type { CompressSettings, ProxyOptions, ResignSettings } from "./config.js";
 export type { ProxyOptions } from "./config.js";
-import { loadOptions, loadRoutes } from "./config.js";
+import { loadNamedProviders, loadOptions, loadRoutes } from "./config.js";
 import { resetProxyCache } from "./upstream-proxy.js";
 import { FALLBACK_EFFECTIVE_WINDOW_FLOOR, findRoute, lookupContextLimit, resolveConfiguredContextLimit, resolveConfiguredOutputLimit, resolveCompressProtocol, resolveDeclaredProtocol, resolveResignSettings } from "./config.js";
 import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOutputLimit, peekRegistryPriceProfile } from "./registry.js";
@@ -73,7 +73,8 @@ import { buildIncomingImageIndex, foldAnchoredCutoff, pruneRetrieveImgExports } 
 import { applyImageCompressionPass, imageCompressionEnabled, imageFullTrailingNote, imageUsageSuffix, storeEffectiveImageCompression, type ImageCompressionSettings } from "./image-compress.js";
 import { rulesEnabled, storeEffectiveRules } from "./rules-feature.js";
 import { storeEffectiveSearchPlanAware } from "./decompress-shared.js";
-import { rewriteJsonResponse, type RewriteCtx } from "./stream.js";
+import { rewriteJsonResponseAsync, type RewriteCtx } from "./stream.js";
+import { externalSummaryEnabled, withExternalSummaryTools } from "./external-summary-surface.js";
 import { applyRanges } from "./stream.js";
 import { attachSubagentSessions } from "./subagent-sessions.js";
 import { buildSessionCacheReport, credentialFingerprint, handleAcpCache, learnedImageReserve, noteClientAbort, noteForwardedBody, noteForwardedImageFacts, readKeySwitchStats, readModelSwitchStats, settleUsageReport } from "./cache-ledger.js";
@@ -82,7 +83,7 @@ import { extractBillingAttributionBlock, preflightCompress, estimateCoreMessages
 import { gcConfigFromEnv, gcSessionFiles } from "./session-gc.js";
 import { countImagesInParsedBody, countImagesInRawBody, imageTokensInRawBody, imageTokensInParsedBody, resolveImageBilling, upstreamHost, type ResolvedImageBilling } from "./image-tokens.js";
 import { APIG_RESIGN_HEADER, APIG_RESIGN_CREDENTIAL_HEADER, APIG_RESIGN_SCHEME, KNOWN_SIGNATURE_SCHEMES, clearSignedRefusal, decodeApigCredential, inboundSignedScheme, readPendingRefusals, recordSignedRefusal, resignApig, signedRefusal, unresolvedRefusals } from "./apig-resign.js";
-import { renderUI, handleConfigGet, handleConfigPut, buildOverview, buildSessionList, buildSessionPage, buildSessionDetail, hiddenEmptyCount } from "./web/index.js";
+import { renderUI, handleConfigGet, handleConfigPut, handleSummaryCredentialPut, buildOverview, buildSessionList, buildSessionPage, buildSessionDetail, hiddenEmptyCount } from "./web/index.js";
 import { reapOrphanBlocks } from "./orphan-gc.js";
 import { conflictScanEnabled, isDesignBenign, scanClientPlugins, sniffScanClient } from "./thirdparty-scan.js";
 import { clearConflictEvents, recordConflict, summarizeConflicts } from "./conflict-watch.js";
@@ -105,9 +106,9 @@ import { reasoningGuardEngages, runReasoningGuard } from "./reasoning-guard.js";
 import { sanitizeResponsesInputIds, dropWhitespaceResponsesMessages, normalizeResponsesMessageItems } from "./loop/adapter-responses.js";
 import { CODEX_COMPACT_HEALTH_RATIO, codexCompactMode, isCodexClient, hasCompactionTrigger, stripBiliCompactionItems, replaceBiliCompactionItems, codexCompactGate, codexCompactGatePre, buildTriggerForgeBody, mergeForgedSummaries } from "./codex-compact.js";
 import { stripAcpPanelMessages, stripAcpPanelResponsesInput, stripAcpStatusMarkers } from "./acp-panel.js";
-import { rewriteOpenaiJsonResponse } from "./stream-openai.js";
-import { rewriteGoogleJsonResponse } from "./stream-google.js";
-import { rewriteResponsesJsonResponse } from "./stream-responses.js";
+import { rewriteOpenaiJsonResponseAsync } from "./stream-openai.js";
+import { rewriteGoogleJsonResponseAsync } from "./stream-google.js";
+import { rewriteResponsesJsonResponseAsync } from "./stream-responses.js";
 import { observeResponsesTerminalState } from "./stream-terminal.js";
 import { emitPreflightError, emitStreamError } from "./stream-error.js";
 import { affinityToken, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, conversationHeaderSource, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity, shouldStampRelayAffinityPck, type ConversationIdentity } from "./session-id.js";
@@ -1688,7 +1689,7 @@ async function handle(
                 native = capRegistryWindowByStandard(model, await contextFromRegistry(model, host), hasTierEvidence);
                 if (native) nativeFromFallback = false;
             }
-            reqConfig = resolveRequestConfig(config, opts.routes, embeddedUrl, model, native, opts.compress);
+            reqConfig = resolveRequestConfig(config, opts.routes, embeddedUrl, model, native, opts.compress, opts.namedProviders ?? {});
             {
                 const wsSource = betaWindow ? "anthropic-beta" : suffixWindow ? "model-suffix" : pluginWindow ? "plugin" : runtimeWindow ? "runtime-info" : launcherWindow ? "launcher" : configuredWindow ? "configured" : peekWindow ? "registry-peek" : native ? "table-or-registry" : "default";
                 wsSourceForLog = wsSource;
@@ -2216,6 +2217,8 @@ async function handle(
         // request (route/model can change it — latest wins). Persisted with the
         // session so post-hoc forensics never needs config-mtime archaeology.
         session.meta.activePack = reqSurfacePack;
+        if (externalSummaryEnabled(reqConfig)) session.meta.summaryInstructions = buildCompressSystemPrompt(reqPrompts, reqSurface?.promptSections);
+        else delete session.meta.summaryInstructions;
         // #1082: rebuild-cost signal for the session-file GC — token estimate
         // of the RAW wire payload (full history as received, pre-fold/injection).
         // Text + images: image bytes are skipped by estimateRawBodyTokens but
@@ -3867,7 +3870,7 @@ async function prepareAnthropic(
         nudge = turn.nudge;
         session.stats.contextTokens = tokenCount;
         session.stats.contextTokensSource = tokenCountSource;
-        if (!session.meta.title) {
+        if (!session.meta.title || isAutoInjectedNotification(session.meta.title)) {
             const t = deriveTitle(msgs);
             if (t) session.meta.title = t;
         }
@@ -3924,7 +3927,7 @@ async function prepareAnthropic(
         // the compress prompt on round-2, the exact F2 seam the matrix pins).
         systemOut = stampAnthropicSystemCacheControl(systemOut, anthropicCacheMarks !== undefined);
         if (injectTools) {
-            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts, ccrEnabled(session));
+            toolsOut = injectTool(parsed.tools, [...(absorbActive ? [absorbTools.anthropic] : []), ...(rulesActive ? [RULE_TOOL] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).anthropic] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL] : [])], surface?.toolPrompts, ccrEnabled(session), externalSummaryEnabled(config));
         }
         // Nudge as a separate trailing user message (cache-friendly): the
         // system block stays byte-stable so the prefix cache survives.
@@ -3937,7 +3940,7 @@ async function prepareAnthropic(
             try {
                 const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
                 if (rendered.text) {
-                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text), externalSummaryEnabled(config)), visibilityMarkers) }];
                 }
             } catch {
             }
@@ -4114,7 +4117,7 @@ async function prepareOpenai(
         nudge = turn.nudge;
         session.stats.contextTokens = tokenCount;
         session.stats.contextTokensSource = tokenCountSource;
-        if (!session.meta.title) {
+        if (!session.meta.title || isAutoInjectedNotification(session.meta.title)) {
             const t = deriveTitle(msgs);
             if (t) session.meta.title = t;
         }
@@ -4157,7 +4160,7 @@ async function prepareOpenai(
         // would invalidate the cache every turn.
         const sysParts: string[] = [];
         if (openaiSystemText) sysParts.push(openaiSystemText);
-        if (shouldInject) sysParts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers));
+        if (shouldInject) sysParts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections), externalSummaryEnabled(config)), visibilityMarkers));
         else if (!isTitleGen && !knobRenderNone()) {
             // #1881: the NEVER-echo prohibition follows the rendered tags, not the tool switch.
             const tagsOnly = buildAcpTagsOnlyPrompt("function", prompts, surface?.promptSections);
@@ -4174,7 +4177,7 @@ async function prepareOpenai(
         // avoids double-counting it.
         openaiOutboundSystem = sysParts.join("\n\n");
         if (injectTools) {
-            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [absorbTools.openai] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts, ccrEnabled(session));
+            toolsOut = injectOpenaiTool(parsed.tools, [...(absorbActive ? [absorbTools.openai] : []), ...(rulesActive ? [RULE_TOOL_OPENAI] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).openai] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_OPENAI] : [])], surface?.toolPrompts, ccrEnabled(session), externalSummaryEnabled(config));
         }
         // Nudge as a separate trailing user message (cache-friendly). Injected
         // in BOTH modes (#451): plugin agents supply the ACP tools but have no
@@ -4186,7 +4189,7 @@ async function prepareOpenai(
             try {
                 const rendered = renderNudgeText(turn.nudge, prompts, surface?.nudgeSections);
                 if (rendered.text) {
-                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) }];
+                    rebuiltMessages = [...rebuiltMessages, { role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text), externalSummaryEnabled(config)), visibilityMarkers) }];
                 }
             } catch {
             }
@@ -4389,7 +4392,7 @@ async function prepareGoogle(
         nudge = turn.nudge;
         session.stats.contextTokens = tokenCount;
         session.stats.contextTokensSource = tokenCountSource;
-        if (!session.meta.title) {
+        if (!session.meta.title || isAutoInjectedNotification(session.meta.title)) {
             const t = deriveTitle(msgs);
             if (t) session.meta.title = t;
         }
@@ -4414,7 +4417,7 @@ async function prepareGoogle(
         // constants, so the system anchor stays identical across normal turns
         // and round-2 re-requests — skipping them here would fork the prefix
         // at every fold and collapse the upstream cache hit.
-        if (shouldInject) sysParts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers));
+        if (shouldInject) sysParts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections), externalSummaryEnabled(config)), visibilityMarkers));
         else if (!isTitleGen) {
             // #1881: the NEVER-echo prohibition follows the rendered tags, not the tool switch.
             const tagsOnly = buildAcpTagsOnlyPrompt("function", prompts, surface?.promptSections);
@@ -4428,7 +4431,7 @@ async function prepareGoogle(
         const extraSystemParts = sysParts.slice(googleClientSystem ? 1 : 0);
         systemInstruction = extraSystemParts.length > 0 ? { parts: sysParts.map((text) => ({ text })) } : parsed.systemInstruction;
         if (injectTools) {
-            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts, ccrEnabled(session));
+            toolsOut = injectGoogleTool(parsed.tools, [...(absorbActive ? [absorbTools.google] : []), ...(rulesActive ? [RULE_TOOL_GOOGLE] : []), ...(ccrEnabled(session) ? [retrieveToolsFor(retrieveToolName(session)).google] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_GOOGLE] : [])], surface?.toolPrompts, ccrEnabled(session), externalSummaryEnabled(config));
         }
         if (sysNotes.length > 0) {
             rebuiltContents = appendGoogleNudge(rebuiltContents, sysNotes.join("\n\n---\n\n"));
@@ -4696,7 +4699,7 @@ async function prepareResponses(
         nudge = turn.nudge;
         session.stats.contextTokens = tokenCount;
         session.stats.contextTokensSource = tokenCountSource;
-        if (!session.meta.title) {
+        if (!session.meta.title || isAutoInjectedNotification(session.meta.title)) {
             const t = deriveTitle(msgs);
             if (t) session.meta.title = t;
         }
@@ -4723,7 +4726,7 @@ async function prepareResponses(
             ? buildAcpTagsOnlyPrompt(responsesTextProtocol ? "hybrid" : "function", prompts, surface?.promptSections)
             : "";
         if (shouldInject && !isCompactionTrigger && !knobNoCompressPrompt()) {
-            const prompt = withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers);
+            const prompt = withMarkerIntegrityNote(withSummaryBudgetNote(responsesTextProtocol ? buildCompressHybridSystemPrompt(prompts, surface?.promptSections) : buildCompressSystemPrompt(prompts, surface?.promptSections), externalSummaryEnabled(config)), visibilityMarkers);
             const devParts = [...projection.systemParts, ...forgedSummaries, prompt];
             if (absorbActive) devParts.push(buildAbsorbSystemPrompt(absorbToolName(loopConfig)));
             const devContent = devParts.join("\n\n---\n\n");
@@ -4736,8 +4739,8 @@ async function prepareResponses(
                 const ccrOn = ccrEnabled(session);
                 const respExtra = [...(absorbActive ? [absorbTools.responses] : []), ...(rulesActive ? [RULE_TOOL_RESPONSES] : []), ...(ccrOn ? [retrieveToolsFor(retrieveToolName(session)).responses] : []), ...(imageCompressionEnabled(session) ? [IMAGE_FULL_TOOL_RESPONSES] : [])];
                 toolsOut = responsesTextProtocol
-                    ? injectResponsesTool(parsed.tools, ccrOn ? BILI_ACP_READONLY_TOOLS_RESPONSES : BILI_ACP_READONLY_TOOLS_RESPONSES_NO_RANGE, surface?.toolPrompts)
-                    : injectResponsesTool(parsed.tools, respExtra.length > 0 ? [...(ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), ...respExtra] : (ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), surface?.toolPrompts);
+                    ? injectResponsesTool(parsed.tools, ccrOn ? BILI_ACP_READONLY_TOOLS_RESPONSES : BILI_ACP_READONLY_TOOLS_RESPONSES_NO_RANGE, surface?.toolPrompts, externalSummaryEnabled(config))
+                    : injectResponsesTool(parsed.tools, respExtra.length > 0 ? [...(ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), ...respExtra] : (ccrOn ? BILI_ACP_TOOLS_RESPONSES : BILI_ACP_TOOLS_RESPONSES_NO_RANGE), surface?.toolPrompts, externalSummaryEnabled(config));
             }
         } else if (tagsOnlyPrompt !== "" || projection.systemParts.length > 0 || forgedSummaries.length > 0) {
             const devContent = [...projection.systemParts, ...forgedSummaries, ...(tagsOnlyPrompt !== "" ? [tagsOnlyPrompt] : [])].join("\n\n---\n\n");
@@ -4768,7 +4771,7 @@ async function prepareResponses(
                     const inputItems: ResponseInputItem[] = typeof rebuiltInput === "string"
                         ? [{ type: "message", role: "user", content: rebuiltInput }]
                         : rebuiltInput;
-                    inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text)), visibilityMarkers) });
+                    inputItems.push({ type: "message", role: "user", content: withMarkerIntegrityNote(withSummaryBudgetNote(withStagedCompressGuidance(rendered.text), externalSummaryEnabled(config)), visibilityMarkers) });
                     rebuiltInput = inputItems;
                     log("debug", `[${sessionId}] [inject] ephemeral nudge appended as trailing user turn (${rendered.text.length} chars)`);
                 }
@@ -5136,7 +5139,7 @@ function injectSystem(
     // (which changes every turn) is appended as a trailing user message by
     // the caller (prepareAnthropic), never merged into system.
     const parts: string[] = [];
-    if (opts.compress.injectTool) parts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections)), visibilityMarkers));
+    if (opts.compress.injectTool) parts.push(withMarkerIntegrityNote(withSummaryBudgetNote(buildCompressSystemPrompt(prompts, surface?.promptSections), externalSummaryEnabled(config)), visibilityMarkers));
     else if (!knobRenderNone()) {
         // #1881: the NEVER-echo prohibition follows the rendered tags, not the tool switch.
         const tagsOnly = buildAcpTagsOnlyPrompt("function", prompts, surface?.promptSections);
@@ -5155,10 +5158,10 @@ function injectSystem(
 // cannot be filtered per request) are dropped here so the upstream sees
 // exactly one definition per name, and it is bili's (its arg schemas are what
 // the compress loop dispatches on). Plugin mode never calls these helpers.
-function injectTool(tools: unknown[] | undefined, extras?: readonly { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false): unknown[] {
+function injectTool(tools: unknown[] | undefined, extras?: readonly { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false, externalOn = false): unknown[] {
     // #1712: decompress's startId/endId execute only on CCR-armed sessions
     // (#1179), so serve the no-range schema when CCR is off.
-    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, toolPrompts);
+    const acp = withExternalSummaryTools(applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_ANTHROPIC : BILI_ACP_TOOLS_ANTHROPIC_NO_RANGE, toolPrompts), externalOn);
     const list = extras ?? [];
     if (!Array.isArray(tools)) return [...acp, ...list];
     const owned = new Set<string>(acp.map((t) => t.name));
@@ -5170,8 +5173,8 @@ function injectTool(tools: unknown[] | undefined, extras?: readonly { name: stri
     return [...kept, ...acp, ...list];
 }
 
-function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly OpenAITool[], toolPrompts?: ToolPrompts, ccrOn = false): OpenAITool[] {
-    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE, toolPrompts) as OpenAITool[];
+function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly OpenAITool[], toolPrompts?: ToolPrompts, ccrOn = false, externalOn = false): OpenAITool[] {
+    const acp = withExternalSummaryTools(applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_OPENAI : BILI_ACP_TOOLS_OPENAI_NO_RANGE, toolPrompts), externalOn) as OpenAITool[];
     const list = extras ?? [];
     if (!Array.isArray(tools)) return [...acp, ...list] as OpenAITool[];
     const owned = new Set<string>(acp.map((t) => t.function.name));
@@ -5187,8 +5190,8 @@ function injectOpenaiTool(tools: OpenAITool[] | undefined, extras?: readonly Ope
  *  nests declarations one level deeper than the OpenAI shape
  *  (`tools[].functionDeclarations[]`), so presence is collected across every
  *  entry and the missing declarations are appended as one new entry. */
-function injectGoogleTool(tools: GoogleTool[] | undefined, extra?: { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false): GoogleTool[] {
-    const acp = applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_GOOGLE : BILI_ACP_TOOLS_GOOGLE_NO_RANGE, toolPrompts) as GoogleFunctionDeclaration[];
+function injectGoogleTool(tools: GoogleTool[] | undefined, extra?: { name: string }[], toolPrompts?: ToolPrompts, ccrOn = false, externalOn = false): GoogleTool[] {
+    const acp = withExternalSummaryTools(applyAcpToolOverrides(ccrOn ? BILI_ACP_TOOLS_GOOGLE : BILI_ACP_TOOLS_GOOGLE_NO_RANGE, toolPrompts), externalOn) as GoogleFunctionDeclaration[];
     const wanted: { name: string }[] = extra ? [...acp, ...extra] : [...acp];
     if (!Array.isArray(tools)) return [{ functionDeclarations: wanted as GoogleFunctionDeclaration[] }];
     const present = new Set<string>();
@@ -5211,8 +5214,8 @@ const FORCE_TEXT_PROTOCOL = knobForceTextProtocol();
 /** Inject all ACP tools (compress/decompress/search_context/acp_status) in
  *  Responses API flat format, matching the PROXY_TOOL_NAMES set the compress
  *  loop dispatches on. Idempotent. */
-function injectResponsesTool(tools: unknown[] | undefined, toolsToAdd: readonly { name: string }[] = BILI_ACP_TOOLS_RESPONSES, toolPrompts?: ToolPrompts): unknown[] {
-    const base = applyAcpToolOverrides(toolsToAdd, toolPrompts);
+function injectResponsesTool(tools: unknown[] | undefined, toolsToAdd: readonly { name: string }[] = BILI_ACP_TOOLS_RESPONSES, toolPrompts?: ToolPrompts, externalOn = false): unknown[] {
+    const base = withExternalSummaryTools(applyAcpToolOverrides(toolsToAdd, toolPrompts), externalOn);
     if (!Array.isArray(tools)) return [...base];
     // Same #920 rule as injectTool/injectOpenaiTool: bili owns these names.
     const owned = new Set<string>(base.map((t) => t.name));
@@ -7174,7 +7177,7 @@ async function forward(
                 ? `\n\n${buildAbsorbSystemPrompt(absorbToolName(loopConfig))}`
                 : "";
             const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (parsedReq as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
-            const systemPrompt = withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections)), visibilityMarkers) + absorbSection;
+            const systemPrompt = withMarkerIntegrityNote(withSummaryBudgetNote(textProtocol ? buildCompressHybridSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections) : buildCompressSystemPrompt(prepared.prompts ?? defaultPrompts, prepared.surface?.promptSections), externalSummaryEnabled(config)), visibilityMarkers) + absorbSection;
             const adapter = pickAdapter(prepared.protocol, parsedReq, textProtocol, prepared.responsesProjection, prepared.anthropicSystem, prepared.openaiSystemText, absorbActive ? absorbToolName(loopConfig) : undefined, prepared.google, prepared.systemNotes, opts.streamErrorShape, prepared.anthropicCacheMarks, absorbActive);
             const refreshFolded = async (current: CoreMessage[]): Promise<CoreMessage[]> => {
                 return withSessionLock(prepared.session, async () => {
@@ -7298,7 +7301,7 @@ async function forward(
                     const visibilityMarkers = resolveCompress(opts.routes, route?.rewrittenUrl, (requestBody as { model?: string }).model, opts.compress).visibilityMarkers ?? true;
                     json = await compressLoopResponsesJson(
                         json,
-                        { core, config, messages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, textProtocol: true, visibilityMarkers },
+                        { core, config, messages: prepared.originalMessages, session: prepared.session, log: ctx.log, proxyUrl, textProtocol: true, visibilityMarkers, signal: clientAbort.signal },
                         requestBody,
                         { url: upstreamUrl, headers: requestHeaders, wireTransform, resign: applyResign },
                     );
@@ -7342,13 +7345,13 @@ async function forward(
                 }
                 if (typeof out === "number") prepared.session.stats.outputTokens += out;
                 if (prepared.protocol === "openai") {
-                    await withSessionLock(prepared.session, () => rewriteOpenaiJsonResponse(json, ctx));
+                    await withSessionLock(prepared.session, () => rewriteOpenaiJsonResponseAsync(json, ctx, clientAbort.signal));
                 } else if (prepared.protocol === "responses") {
-                    await withSessionLock(prepared.session, () => rewriteResponsesJsonResponse(json, ctx));
+                    await withSessionLock(prepared.session, () => rewriteResponsesJsonResponseAsync(json, ctx, clientAbort.signal));
                 } else if (prepared.protocol === "google") {
-                    await withSessionLock(prepared.session, () => rewriteGoogleJsonResponse(json, ctx));
+                    await withSessionLock(prepared.session, () => rewriteGoogleJsonResponseAsync(json, ctx, clientAbort.signal));
                 } else {
-                    await withSessionLock(prepared.session, () => rewriteJsonResponse(json, ctx));
+                    await withSessionLock(prepared.session, () => rewriteJsonResponseAsync(json, ctx, clientAbort.signal));
                 }
                 res.end(JSON.stringify(json));
             } catch {
@@ -7479,16 +7482,45 @@ export function isContextualUserFragment(text: string): boolean {
         asciiCI(t.slice(0, open.length), open) && asciiCI(t.slice(t.length - close.length), close));
 }
 
+// Host-injected notification user fragments (dsh / deepseek-harness): machine-
+// generated notices spliced into the conversation as USER-role messages ahead
+// of the first real question — using one locks the set-once title to launch
+// boilerplate forever (#2286). Same evidence-permitlist discipline as #2118 —
+// extend only with source evidence, never keyword filters. Sources
+// (deepseek-ai/deepseek-harness, MIT):
+//   packages/interaction/user-approval/src/index.ts:
+//     `The approval policy changed from "${previous}" to "${policy}" ...`
+//   packages/core/system-prompt/src/index.ts joinContextSections +
+//   packages/core/agent-loop/src/runtime-context.ts CLEARED:
+//     `Current runtime context ...`
+//   packages/context/time-context/src/index.ts:
+//     `Time sampled while preparing turn N, step M: <ts>` — its
+//     `Browser time zone for this request:` line is embedded in that ONE
+//     message, never sent standalone, so no separate prefix for it.
+const AUTO_INJECTED_NOTIFICATION_PREFIXES: ReadonlyArray<string> = [
+    "The approval policy changed from",
+    "Current runtime context",
+    "Time sampled while preparing turn",
+];
+
+export function isAutoInjectedNotification(text: string): boolean {
+    const t = text.trim();
+    if (!t) return false;
+    return AUTO_INJECTED_NOTIFICATION_PREFIXES.some((p) => asciiCI(t.slice(0, p.length), p));
+}
+
 /** Derive a short human-readable title from the first real user text message.
  *  Used so the web UI can show "Fix auth bug" instead of an opaque hash.
- *  Contextual fragments (#2118) are skipped — if no real question has arrived
- *  yet, no title is set and derivation retries on later requests. */
+ *  Contextual fragments (#2118) and host-injected notifications (#2286) are
+ *  skipped — if no real question has arrived yet, no title is set and
+ *  derivation retries on later requests. */
 export function deriveTitle(messages: CoreMessage[]): string | undefined {
     for (const m of messages) {
         if (m.role !== "user" || m.contentType !== "text") continue;
         const raw = m.text ?? "";
         if (!raw.trim()) continue;
         if (isContextualUserFragment(raw)) continue;
+        if (isAutoInjectedNotification(raw)) continue;
         const clean = raw.replace(/\s+/g, " ").trim();
         return clean.length > 60 ? clean.slice(0, 57) + "\u2026" : clean;
     }

@@ -39,6 +39,9 @@ test("undecodable content-encoding body is forwarded verbatim instead of 400", a
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: {
@@ -107,6 +110,9 @@ test("oversized decompressed body is rejected 413 and not forwarded", async () =
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: {
@@ -175,6 +181,9 @@ test("unknown-path passthrough keeps content-encoding on the forwarded request",
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: {
@@ -240,6 +249,9 @@ test("response content-encoding is stripped when forwarding upstream responses",
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
         port: 0,
+        proxy: "",
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         host: "127.0.0.1",
         upstream: "http://127.0.0.1",
         routes: {

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { PathLike } from "node:fs";
 import { rmrf } from "./tmp-rm.ts";
+import { supportsFileSymlink } from "./platform-capabilities.ts";
 type SymlinkKind = "dir" | "file" | "junction";
 import net from "node:net";
 import os from "node:os";
@@ -3593,7 +3594,11 @@ test("writeDshAcpPatch: honors an explicit bare-specifier entry name (#1590)", (
     }
 });
 
-test("writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare entry, missing or broken shim falls back to the file URL (#1590)", () => {
+test("writeDshClientShimFiles + dshPluginEntry: resolvable shim yields the bare entry, missing or broken shim falls back to the file URL (#1590)", (t) => {
+    if (!supportsFileSymlink()) {
+        t.skip("the shim contract requires file symlinks for live bundle updates");
+        return;
+    }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-shim-"));
     try {
         // os.tmpdir() sits inside this repo: a differently-named package.json
@@ -3664,6 +3669,10 @@ test("writeDshClientShim: stamps the real bili version into the shim package.jso
         t.skip("needs a built dist (npm run build first)");
         return;
     }
+    if (!supportsFileSymlink()) {
+        t.skip("the shim contract requires file symlinks for live bundle updates");
+        return;
+    }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-shimver-"));
     try {
         const home = path.join(dir, ".dsh");
@@ -3721,7 +3730,8 @@ test("prepareCodexHome: no real config → overlay holds only the bili MCP block
         assert.ok(txt.includes(`BILI_CONVERSATION_ID = ${JSON.stringify(cid)}`));
         // the command value must be a quoted TOML basic string — only then does a spaced/quoted Windows path survive being read from the file
         assert.match(txt, /^command = ".+"$/m);
-        assert.ok(fs.lstatSync(path.join(overlay, "auth.json")).isSymbolicLink());
+        const authStat = fs.lstatSync(path.join(overlay, "auth.json"));
+        assert.ok(authStat.isSymbolicLink() || authStat.nlink > 1);
         assert.ok(fs.lstatSync(path.join(overlay, "sessions")).isSymbolicLink());
         assert.equal(fs.readFileSync(path.join(dir, "auth.json"), "utf8"), authOriginal);
         assert.ok(!fs.existsSync(path.join(dir, "config.toml")));
@@ -3828,7 +3838,11 @@ test("prepareCodexMcpInjection: routing-only launch (no MCP) still builds the ov
     }
 });
 
-test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the overlay (#535 phase 4)", async () => {
+test("runLaunch dsh: non-loopback upstreams ride proxy envs, loopback keeps the overlay (#535 phase 4)", async (t) => {
+    if (!supportsFileSymlink()) {
+        t.skip("the dsh live shim contract requires file symlinks for live bundle updates");
+        return;
+    }
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-launch-"));
     const prevBin = process.env.BILI_CLIENT_BIN;
     const prevDshHome = process.env.DSH_HOME;
@@ -4476,10 +4490,12 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-codex-budget-"));
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
+    const prevCodexHome = process.env.CODEX_HOME;
     const prevClientBin = process.env.BILI_CLIENT_BIN;
     const prevAnthropicModel = process.env.ANTHROPIC_MODEL;
     const prevAutoCompact = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
     process.env.HOME = home;
+    process.env.CODEX_HOME = path.join(home, ".codex");
     if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
     delete process.env.ANTHROPIC_MODEL;
     delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
@@ -4547,6 +4563,8 @@ test("runLaunch codex: budget args injected for MITM mode (built-in table window
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
+        if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = prevCodexHome;
         if (prevClientBin === undefined) delete process.env.BILI_CLIENT_BIN;
         else process.env.BILI_CLIENT_BIN = prevClientBin;
         if (prevAnthropicModel === undefined) delete process.env.ANTHROPIC_MODEL;
@@ -4613,10 +4631,12 @@ test("runLaunch codex: --no-daemon pinned when supported, escape hatches honored
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-codex-nodaemon-run-"));
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
+    const prevCodexHome = process.env.CODEX_HOME;
     const prevClientBin = process.env.BILI_CLIENT_BIN;
     const prevAnthropicModel = process.env.ANTHROPIC_MODEL;
     const prevAutoCompact = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
     process.env.HOME = home;
+    process.env.CODEX_HOME = path.join(home, ".codex");
     if (prevUserProfile !== undefined) process.env.USERPROFILE = home;
     delete process.env.ANTHROPIC_MODEL;
     delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
@@ -4702,6 +4722,8 @@ test("runLaunch codex: --no-daemon pinned when supported, escape hatches honored
         process.env.HOME = prevHome;
         if (prevUserProfile === undefined) delete process.env.USERPROFILE;
         else process.env.USERPROFILE = prevUserProfile;
+        if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = prevCodexHome;
         if (prevClientBin === undefined) delete process.env.BILI_CLIENT_BIN;
         else process.env.BILI_CLIENT_BIN = prevClientBin;
         if (prevAnthropicModel === undefined) delete process.env.ANTHROPIC_MODEL;

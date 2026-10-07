@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { prepareCodexHome, renderCodexDotEnv } from "../src/launcher.ts";
+import { supportsFileSymlink } from "./platform-capabilities.ts";
 import { rmrf } from "./tmp-rm.ts";
 
 const ORIGIN = "http://127.0.0.1:8787";
@@ -87,7 +88,11 @@ test("prepareCodexHome: generated .env is a private regular file, real .env unto
     }
 });
 
-test("prepareCodexHome: migrates a pre-existing shared .env symlink to an owned file (#1802)", () => {
+test("prepareCodexHome: migrates a pre-existing shared .env symlink to an owned file (#1802)", (t) => {
+    if (!supportsFileSymlink()) {
+        t.skip("file symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege on this Windows host");
+        return;
+    }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cx-env-"));
     try {
         const realEnv = path.join(dir, ".env");
@@ -174,7 +179,8 @@ test("prepareCodexHome: MCP disabled still protects routing; config.toml stays s
         assert.ok(overlay);
         assert.ok(fs.lstatSync(path.join(overlay, ".env")).isFile(), ".env generated even without MCP");
         const cfgLink = path.join(overlay, "config.toml");
-        assert.ok(fs.lstatSync(cfgLink).isSymbolicLink(), "config.toml shared when no bili block needed");
+        const cfgStat = fs.lstatSync(cfgLink);
+        assert.ok(cfgStat.isSymbolicLink() || cfgStat.nlink > 1, "config.toml shared when no bili block needed");
         assert.ok(!fs.readFileSync(cfgLink, "utf8").includes("[mcp_servers.bili]"));
     } finally {
         rmrf(dir);

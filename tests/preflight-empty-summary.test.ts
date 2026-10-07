@@ -427,10 +427,13 @@ test("#987 diagnoseEmptySummary names plain-JSON empty completions precisely", (
         diagnoseEmptySummary(anthropic, JSON.parse(anthropic)),
         /plain-JSON completion with empty content \(stop_reason=max_tokens, answered as model=claude-x\)/,
     );
+    // #2309: an explicit Responses terminal state now gets its own precise
+    // diagnosis (the old string claimed "empty content", which is false when
+    // partial text rides the body).
     const responses = JSON.stringify({ id: "resp_1", status: "incomplete", output: [] });
     assert.match(
         diagnoseEmptySummary(responses, JSON.parse(responses)),
-        /plain-JSON completion with empty content \(status=incomplete\)/,
+        /incomplete Responses summary \(status=incomplete\)/,
     );
     // Unrecognized JSON keeps the generic diagnosis (shape guard).
     assert.match(

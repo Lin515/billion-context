@@ -501,11 +501,13 @@ test("#1965: a clean bili exit writes the run's state back into the real home; n
 		},
 		stdio: ["ignore", "ignore", "pipe"],
 	});
+	let nativeStderr = "";
+	native.stderr!.on("data", (chunk: Buffer) => { nativeStderr = (nativeStderr + chunk.toString("utf8")).slice(-4000); });
 	const code2 = await new Promise<number>((resolve, reject) => {
 		const timer = setTimeout(() => { try { native.kill("SIGKILL"); } catch { /* gone */ } reject(new Error("native codex resume timed out")); }, TMO * 2);
 		native.on("exit", (c) => { clearTimeout(timer); resolve(c ?? -1); });
 	});
-	assert.equal(code2, 0, `native codex resume must succeed off the real home (code=${code2})`);
+	assert.equal(code2, 0, `native codex resume must succeed off the real home (code=${code2})\nnative stderr:\n${nativeStderr}`);
 	// The fake answers from the FIRST 收到#N anywhere in the replayed user text:
 	// "#1" coming back proves the ORIGINAL turn's message was restored from the
 	// recovered thread (a fresh session could not contain it).

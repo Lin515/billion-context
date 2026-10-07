@@ -362,6 +362,8 @@ test("integration: tunnel cannot reach the proxy's own management plane (#409 Po
         compat: { roles: {} }, streamErrorShape: "protocol", passthroughSource: null, autoRestartOnUpdate: false, updateTag: "latest", advisoryCheck: false, releaseNotesCheck: false,
         autoUpdate: false,
         mitm: { enabled: false, domains: [] },
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
@@ -426,6 +428,8 @@ test("integration: metadata destination never contacted (403 before any socket);
         compat: { roles: {} }, streamErrorShape: "protocol", passthroughSource: null, autoRestartOnUpdate: false, updateTag: "latest", advisoryCheck: false, releaseNotesCheck: false,
         autoUpdate: false,
         mitm: { enabled: false, domains: [] },
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");
@@ -476,6 +480,8 @@ test("integration: unresolvable /bili/ destination answers 502 transport-class, 
         compat: { roles: {} }, streamErrorShape: "protocol", passthroughSource: null, autoRestartOnUpdate: false, updateTag: "latest", advisoryCheck: false, releaseNotesCheck: false,
         autoUpdate: false,
         mitm: { enabled: false, domains: [] },
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
     };
     const proxy = await startServer(opts);
     if (!proxy.listening) await once(proxy, "listening");

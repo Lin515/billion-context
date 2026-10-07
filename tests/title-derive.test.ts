@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveTitle, isContextualUserFragment } from "../src/server.js";
+import { deriveTitle, isContextualUserFragment, isAutoInjectedNotification } from "../src/server.js";
 import type { CoreMessage } from "acp-kernel";
 
 let seq = 0;
@@ -78,5 +78,69 @@ describe("#2118 isContextualUserFragment mirrors codex matches_marked_text", () 
     it("does not match empty or whitespace-only text", () => {
         assert.equal(isContextualUserFragment(""), false);
         assert.equal(isContextualUserFragment("   \n\t "), false);
+    });
+});
+
+// Exact notification texts from deepseek-ai/deepseek-harness (MIT):
+// packages/interaction/user-approval/src/index.ts,
+// packages/core/system-prompt/src/index.ts joinContextSections,
+// packages/core/agent-loop/src/runtime-context.ts CLEARED,
+// packages/context/time-context/src/index.ts.
+const DSH_APPROVAL = 'The approval policy changed from "ask" to "never" (changed by the user).';
+const DSH_RUNTIME_CTX = "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.";
+const DSH_RUNTIME_CLEARED = "Current runtime context: none. Earlier runtime-context snapshots no longer apply.";
+const DSH_TIME_CTX = "Time sampled while preparing turn 1, step 1: 2026-07-15T09:01:01+08:00[Asia/Shanghai]\nBrowser time zone for this request: Asia/Shanghai. Interpret otherwise-unqualified dates and times in this zone.\nElapsed since the preceding model-visible message: unavailable.";
+
+describe("#2286 deriveTitle skips dsh-injected notifications", () => {
+    it("approval-policy notice ahead of the real question does not become the title", () => {
+        const t = deriveTitle([msg("user", "text", DSH_APPROVAL), msg("user", "text", "帮我重构这个模块")]);
+        assert.equal(t, "帮我重构这个模块");
+    });
+
+    it("all three dsh notification kinds ahead of the real question resolve to it", () => {
+        const t = deriveTitle([
+            msg("user", "text", DSH_APPROVAL),
+            msg("user", "text", DSH_TIME_CTX),
+            msg("user", "text", DSH_RUNTIME_CTX),
+            msg("user", "text", "debug the flaky test"),
+        ]);
+        assert.equal(t, "debug the flaky test");
+    });
+
+    it("only notifications present: no title yet (retries on later requests)", () => {
+        assert.equal(deriveTitle([msg("user", "text", DSH_APPROVAL), msg("user", "text", DSH_TIME_CTX), msg("user", "text", DSH_RUNTIME_CLEARED)]), undefined);
+    });
+
+    it("the browser-time-zone line embedded in the time-context message is covered by its prefix", () => {
+        assert.equal(deriveTitle([msg("user", "text", DSH_TIME_CTX), msg("user", "text", "why is CI red?")]), "why is CI red?");
+    });
+});
+
+describe("#2286 isAutoInjectedNotification prefix permitlist", () => {
+    it("matches every verified dsh notification text", () => {
+        assert.equal(isAutoInjectedNotification(DSH_APPROVAL), true);
+        assert.equal(isAutoInjectedNotification(DSH_RUNTIME_CTX), true);
+        assert.equal(isAutoInjectedNotification(DSH_RUNTIME_CLEARED), true);
+        assert.equal(isAutoInjectedNotification(DSH_TIME_CTX), true);
+    });
+
+    it("matches a polluted set-once title truncated at 60 chars with ellipsis", () => {
+        const truncated = DSH_APPROVAL.slice(0, 57) + "\u2026";
+        assert.equal(isAutoInjectedNotification(truncated), true);
+    });
+
+    it("is ASCII case-insensitive like the codex markers", () => {
+        assert.equal(isAutoInjectedNotification(dshApprovalLower()), true);
+        function dshApprovalLower() { return DSH_APPROVAL.replace(/^The/, "the"); }
+    });
+
+    it("prefix only — a real question mentioning a notice mid-sentence is not filtered", () => {
+        assert.equal(isAutoInjectedNotification('What does "Current runtime context" in my log mean?'), false);
+        assert.equal(isAutoInjectedNotification("Why did the approval policy change today?"), false);
+    });
+
+    it("does not match empty or whitespace-only text", () => {
+        assert.equal(isAutoInjectedNotification(""), false);
+        assert.equal(isAutoInjectedNotification("  \t\n "), false);
     });
 });

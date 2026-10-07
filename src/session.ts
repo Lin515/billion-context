@@ -85,6 +85,8 @@ export type Session = {
          *  forensics can tell which surface served the session without config
          *  archaeology. */
         activePack?: string;
+        /** Resolved request prompt for external summaries, including pack sections. */
+        summaryInstructions?: string;
     };
     /** Cumulative usage stats, summed across all requests. Each sample =
      *  one upstream usage report. Persisted; survives restart. */

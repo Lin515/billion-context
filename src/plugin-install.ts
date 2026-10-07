@@ -485,6 +485,28 @@ export function isBiliClaudeBaseUrl(value: unknown): boolean {
     return /^http:\/\/127\.0\.0\.1:\d{1,5}\/bili\/https?:\/\//.test(value);
 }
 
+/** Disk evidence that the Claude Desktop app is installed — the host whose
+ *  Code tab overrides ANTHROPIC_BASE_URL for its embedded Claude Code
+ *  (#2290), silently voiding the managed block's routing while its
+ *  DISABLE_AUTO_COMPACT still applies. Conservative by design: well-known
+ *  install locations only (portable installs exist), so callers treat a hit
+ *  as an advisory input and a miss as absence-of-evidence, never an error.
+ *  Injectable for tests. */
+export function claudeDesktopPresent(opts: { platform?: string; localAppData?: string; home?: string; appRoots?: string[] } = {}): boolean {
+    const platform = opts.platform ?? process.platform;
+    const home = opts.home ?? os.homedir();
+    if (platform === "win32") {
+        const lad = opts.localAppData ?? process.env.LOCALAPPDATA;
+        if (lad === undefined || lad.length === 0) return false;
+        return fs.existsSync(path.join(lad, "Programs", "Claude"));
+    }
+    if (platform === "darwin") {
+        const roots = opts.appRoots ?? ["/Applications"];
+        return [...roots, path.join(home, "Applications")].some((r) => fs.existsSync(path.join(r, "Claude.app")));
+    }
+    return false;
+}
+
 export function claudeNativeBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
     const origin = `http://127.0.0.1:${resolveClaudeNativePort(env) ?? lanePreferredPort("claude", env)}`;
     return claudeNativeBaseUrlForOrigin(origin, undefined, env);

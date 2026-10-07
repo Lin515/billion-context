@@ -93,6 +93,16 @@ export interface StateStoreOptions<T> {
    */
   validate?: (envelope: PersistedEnvelope<T>) => boolean;
   /**
+   * Co-resident files under `dir` that are NOT records of this store —
+   * foreign payloads sharing the directory namespace by design (e.g. a
+   * sibling content store next to session JSONs). When set, loadAll skips
+   * matching files BEFORE reading them: no parse, no log line, they are
+   * expected residents rather than anomalies. Receives the absolute file
+   * path. Must be conservative: a matching file is never loaded as a
+   * record, ever. Default: none — every walked file is probed as before.
+   */
+  foreignFile?: (file: string) => boolean;
+  /**
    * Optional codec applied around every write (canonical + spill) and
    * read. See StateStoreCodec. Default: none — files are plain UTF-8 JSON.
    */
@@ -134,7 +144,8 @@ export interface StateStoreOptions<T> {
  *   built at WRITE time from a builder, so late mutations are picked up
  * - optional record codec (compress/encrypt at rest): encode on every write,
  *   decode on every read; a decode failure is corrupt-file semantics
- * - loadAll skips `.tmp-*` orphans, corrupt JSON, and records whose
+ * - loadAll skips `.tmp-*` orphans, declared foreign co-residents
+ *   (`foreignFile`, before any read), corrupt JSON, and records whose
  *   filename does not match their id — one bad file never blocks boot; it
  *   reconciles a canonical record against its spill by savedAt (freshest wins)
  *
@@ -152,6 +163,7 @@ export class StateStore<T> {
   private readonly legacyFn?: (parsed: unknown) => LegacyAdoption<T> | null;
   private readonly relPathFn?: (id: string, payload: T) => string;
   private readonly validateFn: (envelope: PersistedEnvelope<T>) => boolean;
+  private readonly foreignFileFn?: (file: string) => boolean;
   private readonly codec?: StateStoreCodec;
   private readonly retryAttempts: number;
   private readonly retryBaseMs: number;
@@ -181,6 +193,7 @@ export class StateStore<T> {
     this.relPathFn = opts.relPath;
     this.legacyFn = opts.legacy;
     this.validateFn = opts.validate ?? defaultValidate;
+    this.foreignFileFn = opts.foreignFile;
     this.codec = opts.codec;
     this.retryAttempts = Math.max(1, opts.retryAttempts ?? 6);
     this.retryBaseMs = Math.max(1, opts.retryBaseMs ?? 50);
@@ -341,13 +354,15 @@ export class StateStore<T> {
 
   /** Load every record under dir. Populates the discovery map (enables
    *  loadSync for namespaced relPaths). Skips corrupt files, `.tmp-*`
-   *  orphans, and records whose filename does not match their id — one
+   *  orphans, declared foreign co-residents (`foreignFile`, before any
+   *  read), and records whose filename does not match their id — one
    *  bad file never blocks boot. Never throws. */
   async loadAll(): Promise<Map<string, PersistedEnvelope<T>>> {
     const out = new Map<string, PersistedEnvelope<T>>();
     if (!this.enabled) return out;
     const files = await this.walkJsonFiles(this.dir);
     for (const file of files) {
+      if (this.foreignFileFn?.(file)) continue;
       const envelope = this.readEnvelope(file);
       if (!envelope) continue;
       const base = path.basename(file);

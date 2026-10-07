@@ -267,6 +267,69 @@ test("loadAll skips corrupt files, tmp orphans, and id/filename mismatches", asy
   }
 });
 
+test("loadAll skips declared foreign co-residents before reading them (#2298)", async () => {
+  const dir = tmpDir();
+  try {
+    const logs: Array<{ level: string; msg: string }> = [];
+    const s = store(dir, {
+      log: (level, msg) => logs.push({ level, msg }),
+      foreignFile: (file) => path.basename(file).endsWith(".content-store.json"),
+    });
+    await s.writeNow("good-1", () => ({ label: "good", count: 1 }));
+    // A co-resident foreign file with a NON-envelope payload (the shape of
+    // billion-context's CCR content stores): if the store READ it,
+    // readEnvelope would log "skipping invalid record".
+    const ns = path.join(dir, "openai");
+    mkdirSync(ns, { recursive: true });
+    const foreignJson = path.join(ns, "host_abc123.content-store.json");
+    writeFileSync(
+      foreignJson,
+      JSON.stringify({ version: 1, byRef: {}, byHash: {} }),
+      "utf8",
+    );
+    // Undecodable bytes under the same suffix: a read attempt would surface
+    // as a "corrupt" warn too — total silence proves the file was never
+    // opened at all.
+    const foreignBin = path.join(ns, "host_deadbeef.content-store.json");
+    writeFileSync(foreignBin, Buffer.from([0xff, 0xfe, 0x00, 0x01]));
+    const all = await s.loadAll();
+    assert.deepEqual([...all.keys()], ["good-1"]);
+    assert.equal(
+      logs.filter((l) => l.msg.includes("content-store")).length,
+      0,
+      "foreign co-residents produce no log line (not even corrupt-warns)",
+    );
+    // The skip is read-only: the files stay on disk untouched.
+    assert.ok(existsSync(foreignJson));
+    assert.ok(existsSync(foreignBin));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("without the foreignFile predicate, co-resident foreign files are still probed (default unchanged)", async () => {
+  const dir = tmpDir();
+  try {
+    const logs: string[] = [];
+    const s = store(dir, {
+      log: (level, msg) => logs.push(`${level}:${msg}`),
+    });
+    writeFileSync(
+      path.join(dir, "host_abc123.content-store.json"),
+      JSON.stringify({ version: 1, byRef: {}, byHash: {} }),
+      "utf8",
+    );
+    const all = await s.loadAll();
+    assert.equal(all.size, 0);
+    assert.ok(
+      logs.some((l) => l.includes("skipping invalid record")),
+      "the default probe-and-warn behavior stays intact when no predicate is set",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadAll rejects records failing the downstream validate hook", async () => {
   const dir = tmpDir();
   try {

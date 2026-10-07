@@ -36,6 +36,8 @@ async function startProxy(upstream: http.Server | net.Server, debug: boolean): P
     process.env.BILI_CONFIG_FILE = biliConfig;
     const upstreamPort = (upstream.address() as { port: number }).port;
     const opts: ProxyOptions = {
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
+        auxProxyFallback: { explicitDirect: true, globalSource: "direct" },
         port: 0,
         host: "127.0.0.1",
         upstream: `http://127.0.0.1:${upstreamPort}`,

@@ -293,6 +293,70 @@ test("#2199: opencode npm lane surfaces the cache copy path + disk version and g
     }
 });
 
+test("renderDoctorReport: lane warnings render under the lane row without touching the verdict", () => {
+    const text = renderDoctorReport(syntheticReport({
+        lanes: [
+            { agent: "claude", kind: "reference", installed: true, detail: "installed", verdict: "ok", warnings: ["Claude Desktop detected on this machine: its Code tab overrides ANTHROPIC_BASE_URL"] },
+            { agent: "pi", kind: "host-managed", installed: false, detail: "not installed", verdict: "absent" },
+        ],
+    }));
+    assert.match(text, /⚠️ Claude Desktop detected/);
+    assert.match(text, /claude\s+ok\s+reference/);
+});
+
+test("#2290: claude lane surfaces the last hook-detected routing bypass from the state marker", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "bc-doctor-claude-warn-"));
+    const cfgDir = path.join(base, "claude-cfg");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(path.join(cfgDir, "settings.json"), JSON.stringify({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:48787/bili/https://api.anthropic.com", DISABLE_AUTO_COMPACT: "1" } }));
+    const stateLane = path.join(base, "xdg-state", "billion-context");
+    mkdirSync(stateLane, { recursive: true });
+    writeFileSync(path.join(stateLane, "claude-routing-warning.json"), JSON.stringify({ at: Date.parse("2026-10-07T00:00:00Z"), reasons: ["CLAUDE_CODE_ENTRYPOINT=claude-desktop — this host sets its own ANTHROPIC_BASE_URL"] }));
+    try {
+        await mockFetch(() => new Response(JSON.stringify({ name: "billion-context", version: "999.0.0" }), { status: 200, headers: { "Content-Type": "application/json" } }))(async () => {
+            await withEnv({
+                HOME: path.join(base, "home"),
+                XDG_CONFIG_HOME: path.join(base, "xdg-config"),
+                XDG_DATA_HOME: path.join(base, "xdg-data"),
+                XDG_CACHE_HOME: path.join(base, "xdg-cache"),
+                XDG_STATE_HOME: path.join(base, "xdg-state"),
+                PI_CODING_AGENT_DIR: undefined, PI_HOME: undefined, DSH_HOME: undefined,
+                HERMES_HOME: undefined, KIMI_CODE_HOME: undefined, CODEX_HOME: undefined,
+                CLAUDE_CONFIG_DIR: cfgDir,
+                OPENCODE_CONFIG: undefined,
+            }, async () => {
+                const report = await runDoctor({ packageName: "billion-context", runningVersion: "0.1.143" });
+                const cl = report.lanes.find((l) => l.agent === "claude");
+                assert.equal(cl?.installed, true);
+                assert.ok(cl?.warnings?.some((w) => w.includes("routing bypass") && w.includes("CLAUDE_CODE_ENTRYPOINT=claude-desktop")), `warnings: ${JSON.stringify(cl?.warnings)}`);
+                assert.match(renderDoctorReport(report), /⚠️ .*routing bypass/);
+            });
+        });
+        // Corrupt marker: surfaced as nothing, never as a probe failure.
+        writeFileSync(path.join(stateLane, "claude-routing-warning.json"), "{ not json");
+        await mockFetch(() => new Response(JSON.stringify({ name: "billion-context", version: "999.0.0" }), { status: 200, headers: { "Content-Type": "application/json" } }))(async () => {
+            await withEnv({
+                HOME: path.join(base, "home"),
+                XDG_CONFIG_HOME: path.join(base, "xdg-config"),
+                XDG_DATA_HOME: path.join(base, "xdg-data"),
+                XDG_CACHE_HOME: path.join(base, "xdg-cache"),
+                XDG_STATE_HOME: path.join(base, "xdg-state"),
+                PI_CODING_AGENT_DIR: undefined, PI_HOME: undefined, DSH_HOME: undefined,
+                HERMES_HOME: undefined, KIMI_CODE_HOME: undefined, CODEX_HOME: undefined,
+                CLAUDE_CONFIG_DIR: cfgDir,
+                OPENCODE_CONFIG: undefined,
+            }, async () => {
+                const report = await runDoctor({ packageName: "billion-context", runningVersion: "0.1.143" });
+                const cl = report.lanes.find((l) => l.agent === "claude");
+                assert.equal(cl?.verdict, "ok");
+                assert.ok(!cl?.warnings?.some((w) => w.includes("routing bypass")), `corrupt marker must not surface: ${JSON.stringify(cl?.warnings)}`);
+            });
+        });
+    } finally {
+        rmrf(base);
+    }
+});
+
 test("runDoctor: full report against a mocked registry, sandboxed homes", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "bc-doctor-run-"));
     const urls: string[] = [];

@@ -29,12 +29,13 @@
 
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { ensureProxyRunning, LAUNCHER_DEFAULT_HOST } from "./launcher.js";
 import { resolveClaudeNativePort } from "./config.js";
 import { lanePreferredPort } from "./instance.js";
-import { repinClaudeManagedBaseUrl } from "./plugin-install.js";
+import { claudeNativeInstalled, isBiliClaudeBaseUrl, repinClaudeManagedBaseUrl } from "./plugin-install.js";
+import { claudeRoutingWarningFile } from "./paths.js";
 import { nativeBootstrapGate, proxyEnvOrigin } from "./agent/native-bootstrap.js";
 
 /** dist/claude-native-bootstrap.js → sibling dist/index.js (the package
@@ -68,6 +69,65 @@ export function planClaudeNativeBootstrap(env: NodeJS.ProcessEnv): { action: "ex
     if (env.BILLION_CONTEXT_PLUGIN === "0" || env.BILI_NATIVE_CLAUDE === "0") return { action: "passthrough", port, strict };
     if (!nativeBootstrapGate(env, "BILI_NATIVE_CLAUDE")) return { action: "exit", port, strict };
     return { action: "start", port, strict };
+}
+
+// — routing bypass detection (#2290) ——————————————————————————
+// The managed settings block assumes the session dials the pinned /bili/ URL.
+// Some hosts violate that: Claude Desktop spawns embedded Claude Code with its
+// own ANTHROPIC_BASE_URL (claude.ai host auth) that wins over settings.json,
+// while DISABLE_AUTO_COMPACT=1 from the same block still applies — the session
+// then loses BOTH compression paths silently. We cannot fix the running
+// session (the hook cannot mutate its parent's env, and the block is shared
+// with the CLI host), so we detect and warn loudly instead of staying quiet.
+
+/** Entry-points with traffic evidence of overriding the managed base URL.
+ *  Exact permitlist by design: new hosts are added here WITH evidence, never
+ *  generalized ("any non-cli entrypoint") — other hosts may route fine. */
+const BYPASS_ENTRYPOINTS = new Set(["claude-desktop"]);
+
+/** Pure detection (#2290): does this session environment indicate the managed
+ *  ANTHROPIC_BASE_URL will not be honored? Two independent signals, either
+ *  suffices:
+ *   - CLAUDE_CODE_ENTRYPOINT names a known overriding host (Claude Desktop);
+ *   - the session env carries an ANTHROPIC_BASE_URL that is not a bili URL.
+ *  In a healthy terminal session neither fires: claude does not inject its
+ *  settings.env into hook children, so the var is absent unless something
+ *  external set it. Exported for tests. */
+export function claudeNativeRoutingCheck(env: NodeJS.ProcessEnv): { bypassed: boolean; reasons: string[] } {
+    const reasons: string[] = [];
+    const entrypoint = env.CLAUDE_CODE_ENTRYPOINT?.trim().toLowerCase();
+    if (entrypoint !== undefined && BYPASS_ENTRYPOINTS.has(entrypoint)) {
+        reasons.push(`CLAUDE_CODE_ENTRYPOINT=${entrypoint} — this host sets its own ANTHROPIC_BASE_URL for API routing, overriding the managed settings.json value`);
+    }
+    const url = env.ANTHROPIC_BASE_URL?.trim();
+    if (url !== undefined && url.length > 0 && !isBiliClaudeBaseUrl(url)) {
+        reasons.push(`session environment carries ANTHROPIC_BASE_URL=${url}, which is not the managed bili URL`);
+    }
+    return { bypassed: reasons.length > 0, reasons };
+}
+
+/** Persist a detection so `bili doctor` can surface it later (hook stderr is
+ *  only visible in debug/transcript mode). Best-effort: must never throw. */
+export function recordClaudeRoutingWarning(reasons: string[]): void {
+    try {
+        const file = claudeRoutingWarningFile();
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, JSON.stringify({ at: Date.now(), reasons }, null, 2) + "\n");
+    } catch {
+        // persistence is diagnostic sugar — a failure here must not fail the hook
+    }
+}
+
+function warnRoutingBypass(): void {
+    const check = claudeNativeRoutingCheck(process.env);
+    if (!check.bypassed) return;
+    const dacNote = claudeNativeInstalled()
+        ? " In addition, the managed settings block sets DISABLE_AUTO_COMPACT=1, so native auto-compaction is OFF too — long sessions grow unbounded."
+        : "";
+    log(`WARNING: this Claude session will BYPASS bili compression — ${check.reasons.join("; ")}.`);
+    log(`Model requests go direct to the upstream: bili sees no traffic for this conversation (acp_status / acp_cache / the bili MCP tools report "unknown plugin conversation").${dacNote}`);
+    log("Fix: terminal sessions route through bili via settings.json as usual; use the `bili claude` launcher when in doubt. If you ONLY use Claude Desktop, run `bili plugin remove claude` to restore your original settings (.bili-bak) — native auto-compact returns. A documented desktop lane is tracked in #2290.");
+    recordClaudeRoutingWarning(check.reasons);
 }
 
 // — claude host pid resolution ———————————————————————————————
@@ -311,6 +371,14 @@ export function chooseWatchdogParentPid(opts: { read?: ProcReader; parentPid?: n
 async function run(): Promise<void> {
     const plan = planClaudeNativeBootstrap(process.env);
     if (plan.action === "exit") return;
+    // #2290: detect a host that will not honor the managed base URL BEFORE
+    // proxy bring-up — the warning stands even when bring-up then fails (the
+    // two failures compound: no compression AND no lifecycle guarantee).
+    try {
+        warnRoutingBypass();
+    } catch (err) {
+        log(`routing-bypass check failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
     try {
         // The direct parent is the transient `/bin/sh -c` wrapper claude used
         // to launch this hook — it exits with the hook, and a watchdog on it

@@ -51,6 +51,7 @@ import {
 import type { CompressPromptSections, Prompts } from "acp-kernel";
 import { log as loggerLog } from "./logger.js";
 import { maxShrinkPerCompress } from "./fetch-util.js";
+import { EXTERNAL_SUMMARY_NOTE } from "./external-summary-surface.js";
 
 export {
     COMPRESS_TOOL_NAME,
@@ -477,8 +478,10 @@ const SUMMARY_BUDGET_NOTE =
     "\n\n[Per-summary length budget: every compress summary has a hard character cap, and a single oversized summary fails the WHOLE compress call — nothing gets folded. Dense content (many subagent results, long tool outputs) tempts you into writing one giant summary for a big range; don't. When a range is large or dense, SPLIT it into several smaller ranges at logical boundaries and give EACH its own concise, scannable summary, then batch all the ranges in one compress call (content: [{startId,endId,summary}, {…}]). Prefer several tight blocks over one bloated block: each stays under the cap, and smaller blocks are cheaper to re-send and independently searchable/decompressible.]";
 
 /** Append the per-summary length-budget rule to a nudge or system-prompt text.
- *  Unconditional (like withMarkerIntegrityNote): the cap always exists, so the
- *  guidance must be present whenever compression is possible. */
-export function withSummaryBudgetNote(text: string): string {
-    return text + SUMMARY_BUDGET_NOTE;
+ *  The budget note is unconditional (like withMarkerIntegrityNote): the cap
+ *  always exists, so the guidance must be present whenever compression is
+ *  possible. The external-summary disclosure is per-request, decided by the
+ *  caller from the request's resolved Config. */
+export function withSummaryBudgetNote(text: string, external: boolean): string {
+    return text + SUMMARY_BUDGET_NOTE + (external ? EXTERNAL_SUMMARY_NOTE : "");
 }

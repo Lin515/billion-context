@@ -1386,9 +1386,10 @@ export const WEB_CLIENT = `(function () {
             }
             if (fe) cfgSavedSnap = fe.value;
             hydrateQuickConfig(cfg);
+            hydrateSummaryConfig(cfg);
             refreshDirtyFlag();
             const broken = Boolean(cfg.parseError);
-            ["cfg-file-edit", "save-file", "save-upstream", "save-quick"].forEach((id) => { const el = $(id); if (el) el.disabled = broken; });
+            ["cfg-file-edit", "save-file", "save-upstream", "save-quick", "save-summary"].forEach((id) => { const el = $(id); if (el) el.disabled = broken; });
             const ptState = $("pt-state");
             const ptSource = $("pt-source");
             const clearPt = $("clear-passthrough");
@@ -1744,6 +1745,131 @@ export const WEB_CLIENT = `(function () {
         if (fe) fe.addEventListener("input", () => { quickBroken(freshDraft() === null); refreshDirtyFlag(); });
         syncAll();
     }
+    function hydrateSummaryConfig(cfg) {
+        const box = $("summary-fields"), fe = $("cfg-file-edit");
+        if (!box || !fe) return;
+        const status = Object.assign({}, cfg.externalSummaryCredentials || {});
+        function read() {
+            const draft = JSON.parse(fe.value || "{}");
+            if (!draft || typeof draft !== "object" || Array.isArray(draft)) throw new Error(t("cfg.invalid_json"));
+            return draft;
+        }
+        function mutate(fn, repaint) {
+            try {
+                const draft = read();
+                if (!draft.compress) draft.compress = {};
+                if (!draft.compress.externalSummary) draft.compress.externalSummary = { enabled: false, targets: [] };
+                fn(draft.compress.externalSummary);
+                fe.value = JSON.stringify(draft, null, 2);
+                refreshDirtyFlag();
+                if (repaint) render();
+            } catch (e) { toast(e.message, "err"); }
+        }
+        function button(parent, label, action, symbol) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "btn sm";
+            btn.title = label;
+            btn.setAttribute("aria-label", label);
+            if (symbol) btn.innerHTML = symbol; else btn.textContent = label;
+            btn.addEventListener("click", action);
+            parent.appendChild(btn);
+            return btn;
+        }
+        function field(parent, id, label, value, change, type, options) {
+            const lab = document.createElement("label");
+            lab.htmlFor = id;
+            const title = document.createElement("span"); title.textContent = label;
+            lab.appendChild(title);
+            const inp = document.createElement(options ? "select" : "input");
+            inp.id = id; inp.className = "field-input";
+            if (options) options.forEach((v) => { const opt = document.createElement("option"); opt.value = v; opt.textContent = v; inp.appendChild(opt); });
+            else { inp.type = type || "text"; if (type === "number") { inp.min = "1"; inp.step = "1"; } }
+            inp.value = value === undefined ? "" : String(value);
+            inp.addEventListener("change", () => change(type === "number" ? Number(inp.value) : inp.value));
+            lab.appendChild(inp); parent.appendChild(lab);
+            return inp;
+        }
+        function render() {
+            box.replaceChildren();
+            let draft;
+            try { draft = read(); } catch (e) { box.textContent = t("cfg.invalid_json"); return; }
+            const s = (draft.compress && draft.compress.externalSummary) || { enabled: false, targets: [] };
+            if (s.invalid || !Array.isArray(s.targets || [])) { box.textContent = t("summary.invalid"); return; }
+            // Recipes = named (non-URL) providers entries carrying dial fields;
+            // the raw editor below owns their bodies, this panel only wires the
+            // chain (references + budget) and the credential keys they cite.
+            const providers = draft.providers && typeof draft.providers === "object" && !Array.isArray(draft.providers) ? draft.providers : {};
+            const recipes = Object.keys(providers).filter((name) => name.indexOf("http://") !== 0 && name.indexOf("https://") !== 0 && providers[name] && typeof providers[name] === "object" && !Array.isArray(providers[name]) && (providers[name].baseUrl !== undefined || providers[name].api !== undefined)).map((name) => ({ name, recipe: providers[name] }));
+            const options = [];
+            recipes.forEach(({ name, recipe }) => { Object.keys(recipe.models && typeof recipe.models === "object" ? recipe.models : {}).forEach((model) => options.push(name + "/" + model)); });
+            const head = document.createElement("div"); head.className = "summary-actions";
+            const enabled = document.createElement("label");
+            const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.id = "summary-enabled"; toggle.checked = s.enabled === true;
+            toggle.disabled = !!cfg.parseError;
+            toggle.addEventListener("change", () => mutate((v) => { v.enabled = toggle.checked; }));
+            enabled.append(toggle, document.createTextNode(" " + t("summary.enabled"))); head.appendChild(enabled);
+            const add = button(head, t("summary.add"), () => mutate((v) => {
+                if (!v.targets) v.targets = [];
+                v.targets.push(options.find((option) => v.targets.indexOf(option) === -1) || "");
+            }, true));
+            add.disabled = !!cfg.parseError || (s.targets || []).length >= 16 || (options.length === 0 && (s.targets || []).length > 0);
+            box.appendChild(head);
+            if (options.length === 0) {
+                const hint = document.createElement("p"); hint.textContent = t("summary.no_recipes"); box.appendChild(hint);
+            }
+            (s.targets || []).forEach((ref, i) => {
+                const item = document.createElement("fieldset"); item.className = "summary-target";
+                const legend = document.createElement("legend"); legend.textContent = String(i + 1) + ". " + (ref || "—"); item.appendChild(legend);
+                const fields = document.createElement("div"); fields.className = "summary-grid";
+                const refOptions = options.slice();
+                if (ref && refOptions.indexOf(ref) === -1) refOptions.unshift(ref);
+                const set = (value) => mutate((v) => { v.targets[i] = String(value).trim(); }, true);
+                field(fields, "summary-" + i + "-ref", t("summary.ref"), ref, set, refOptions.length ? null : "text", refOptions.length ? refOptions : undefined);
+                item.appendChild(fields);
+                const actions = document.createElement("div"); actions.className = "summary-actions";
+                button(actions, t("summary.up"), () => mutate((v) => { const prev = v.targets[i - 1]; v.targets[i - 1] = v.targets[i]; v.targets[i] = prev; }, true), "&#8593;").disabled = i === 0;
+                button(actions, t("summary.down"), () => mutate((v) => { const next = v.targets[i + 1]; v.targets[i + 1] = v.targets[i]; v.targets[i] = next; }, true), "&#8595;").disabled = i === s.targets.length - 1;
+                button(actions, t("summary.remove"), () => mutate((v) => { v.targets.splice(i, 1); }, true), "&#215;");
+                item.appendChild(actions); item.disabled = !!cfg.parseError; box.appendChild(item);
+            });
+            if (recipes.length) {
+                const creds = document.createElement("div"); creds.className = "summary-creds";
+                const title = document.createElement("h4"); title.textContent = t("summary.credentials"); creds.appendChild(title);
+                recipes.forEach(({ name, recipe }) => {
+                    const row = document.createElement("div"); row.className = "summary-actions";
+                    const ref = typeof recipe.credentialRef === "string" ? "secret:" + recipe.credentialRef : typeof recipe.apiKeyEnv === "string" ? "env:" + recipe.apiKeyEnv : null;
+                    const label = document.createElement("span"); label.textContent = name + " · " + (ref || "—"); row.appendChild(label);
+                    const badge = document.createElement("span"); badge.className = "badge " + (ref && status[ref] ? "ok" : "disk"); badge.textContent = ref && status[ref] ? t("summary.key_set") : t("summary.key_missing"); row.appendChild(badge);
+                    if (ref && ref.indexOf("secret:") === 0) {
+                        const key = field(row, "summary-key-" + name, t("summary.key"), "", () => {}, "password");
+                        key.autocomplete = "new-password"; key.disabled = !!cfg.parseError;
+                        async function saveKey(btn, value) {
+                            busy(btn, true);
+                            try {
+                                const result = await json("/__bili/external-summary/credential", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: recipe.credentialRef, key: value }) });
+                                key.value = ""; status[ref] = result.configured;
+                                render();
+                                toast(t("summary.key_saved"), "ok");
+                            } catch (e) { toast(e.message, "err"); } finally { busy(btn, false); }
+                        }
+                        const save = button(row, t("summary.key_save"), () => saveKey(save, key.value));
+                        const del = button(row, t("summary.key_delete"), () => { if (confirm(t("summary.key_delete") + "?")) saveKey(del, null); });
+                        save.disabled = del.disabled = !!cfg.parseError;
+                    }
+                    creds.appendChild(row);
+                });
+                box.appendChild(creds);
+            }
+            const budget = document.createElement("div"); budget.className = "summary-grid";
+            [["totalTimeoutMs", t("summary.total"), 50000], ["targetTimeoutMs", t("summary.timeout"), 25000], ["maxSummaryBytes", t("summary.bytes"), 65536]].forEach(([key, label, fallback]) => {
+                field(budget, "summary-" + key, label, s.budget && s.budget[key] || fallback, (value) => mutate((v) => { if (!v.budget) v.budget = {}; v.budget[key] = value; }), "number").disabled = !!cfg.parseError;
+            });
+            box.appendChild(budget);
+        }
+        render();
+        fe.onchange = render;
+    }
     async function loadUpstream(cfg) {
         let up = null;
         try { up = await json("/__bili/upstream"); } catch (e) {}
@@ -1941,6 +2067,8 @@ export const WEB_CLIENT = `(function () {
         });
         // #1426: single raw config-file editor — the server validates every known field
         const sf = $("save-file");
+        const ss = $("save-summary");
+        if (ss) ss.addEventListener("click", () => putCfg(ss, { file: $("cfg-file-edit").value }));
         if (sf) sf.addEventListener("click", async () => {
             const el = $("cfg-file-edit");
             const raw = el ? el.value : "";

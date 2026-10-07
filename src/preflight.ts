@@ -19,6 +19,8 @@ import { lastCompressSuffix, type Session } from "./session.js";
 import { peekRegistryOutputLimit } from "./registry.js";
 import { safePrefix } from "./text-safe.js";
 import { applyEstimateCalibration, currentCalibrationFactor } from "./util.js";
+import { configuredSummaryPlan, type ConfiguredSummaryPlan } from "./external-summary-runtime.js";
+import type { ResolvedKernelConfig } from "./compress-settings.js";
 
 // #247: proactive pre-forward compression. When the session's real context
 // (previous turn's upstream input_tokens) exceeds the current model's window
@@ -100,7 +102,7 @@ const FUTILITY_SLACK = 1.2;
 // removes CHUNK_FRACTION x window); larger entry overshoots scale both
 // budgets proportionally, capped at 2x the base (see preflightCompress).
 
-type PreflightProtocol = "anthropic" | "openai" | "responses" | "google";
+export type PreflightProtocol = "anthropic" | "openai" | "responses" | "google";
 
 // #2189: subscription-OAuth credentials (Claude Code login) accept only
 // requests whose system carries the client's billing-attribution block; every
@@ -172,6 +174,8 @@ export interface PreflightDeps {
     upstreamOrigin?: string;
     /** #2133: compress.streamSummary resolved true for this request (three-level cascade). The self-learn flag only sees 400 "stream required" rejections, so gateways that time out long non-streaming completions (Cloudflare 524) can never self-heal — this forces SSE from the first attempt instead. */
     forceStreamSummary?: boolean;
+    /** One external-summary deadline shared by every range/chunk in this invocation. */
+    externalSummary?: ConfiguredSummaryPlan;
     /** #2155: compress.streamSummary resolved FALSE for this request (explicit operator opt-out anywhere in the cascade). Neither learn path (400 "stream required" nor the 524/504 gateway-timeout first-hit learn) may arm, and an already-armed session flag is ignored — the operator said this upstream must never stream summaries. */
     streamSummaryOff?: boolean;
     /** #2189: the client's billing-attribution block from the INBOUND anthropic system (extractBillingAttributionBlock). Carried into every summary call as system[0]; absent → legacy string system unchanged. */
@@ -408,7 +412,7 @@ function windowClampedOutput(base: number, window: number | undefined, system: s
     return Math.min(base, Math.max(MIN_CLAMPED_SUMMARY_OUTPUT, headroom));
 }
 
-function summaryPayload(protocol: PreflightProtocol, model: string, system: string, content: string, stream: boolean, includeMaxOutputTokens: boolean, host?: string, window?: number, billingBlock?: { type: "text"; text: string }): Record<string, unknown> {
+export function summaryPayload(protocol: PreflightProtocol, model: string, system: string, content: string, stream: boolean, includeMaxOutputTokens: boolean, host?: string, window?: number, billingBlock?: { type: "text"; text: string }): Record<string, unknown> {
     const maxOutputTokens = windowClampedOutput(summaryOutputTokens(model, host), window, system, content);
     if (protocol === "anthropic") {
         // #2189: carry the client's billing-attribution block as system[0] with
@@ -607,7 +611,7 @@ export function extractSummaryFromSse(protocol: PreflightProtocol, text: string)
     return out || terminalText;
 }
 
-function extractSummaryText(protocol: PreflightProtocol, json: Record<string, unknown>): string {
+export function extractSummaryText(protocol: PreflightProtocol, json: Record<string, unknown>): string {
     if (protocol === "anthropic") {
         const content = json.content;
         if (!Array.isArray(content)) return "";
@@ -633,14 +637,40 @@ function extractSummaryText(protocol: PreflightProtocol, json: Record<string, un
         const chunks = Array.isArray(json) ? (json as unknown[]) : [json];
         return chunks.map((c) => (c && typeof c === "object" ? googleChunkText(c as Record<string, unknown>) : "")).join("");
     }
+    // #2309: an HTTP-200 Responses body declares its terminal state in
+    // `status`. incomplete/failed means whatever text rides below is NOT a
+    // finished summary, whatever its length — the SSE path already rejects
+    // those terminals (#780/#784); mirror them on the JSON path too, across
+    // both the flat output_text shortcut and the output[] walk, or a 95-char
+    // fragment sails past MIN_SUMMARY_CHARS into a compression block.
+    // Omitted status stays accepted (compat gateways that never send it).
+    const status = typeof json.status === "string" ? json.status : undefined;
+    if (status === "incomplete" || status === "failed") return "";
     if (typeof json.output_text === "string") return json.output_text;
     const output = json.output;
     if (!Array.isArray(output)) return "";
+    // #2308: an explicit type declares what the bytes are — only assistant
+    // message items and their output_text parts are summary body; reasoning
+    // items/parts (reasoning_text, summary_text, ...) must not leak into the
+    // saved summary. Typeless shapes stay accepted for gateways that omit
+    // `type`; top-level output_text compat above is untouched.
     return output
-        .map((o) => (o && typeof o === "object" ? (o as Record<string, unknown>).content : undefined))
+        .map((o) => {
+            if (!o || typeof o !== "object") return undefined;
+            const item = o as Record<string, unknown>;
+            const itemType = typeof item.type === "string" ? item.type : "";
+            if (itemType !== "" && itemType !== "message") return undefined;
+            return item.content;
+        })
         .filter((c): c is unknown[] => Array.isArray(c))
         .flatMap((c) => c)
-        .map((p) => (p && typeof p === "object" && typeof (p as Record<string, unknown>).text === "string" ? (p as Record<string, string>).text : ""))
+        .map((p) => {
+            if (!p || typeof p !== "object") return "";
+            const part = p as Record<string, unknown>;
+            const partType = typeof part.type === "string" ? part.type : "";
+            if (partType !== "" && partType !== "output_text") return "";
+            return typeof part.text === "string" ? part.text : "";
+        })
         .join("");
 }
 
@@ -686,6 +716,36 @@ function extractStreamError(o: Record<string, unknown>): string | null {
     return null;
 }
 
+// #2309: an HTTP-200 Responses body can declare a bad terminal state while
+// still carrying partial text past MIN_SUMMARY_CHARS — the generic
+// "plain-JSON completion with empty content" string is false for such a body
+// (the content IS present, just unfinished). Name the terminal precisely and
+// embed the raw reason/error verbatim: the operator sees WHY without a log
+// cross-reference, and emptySummaryIsSizeDriven sees the size signal
+// (reason=max_output_tokens halves like finish_reason=length).
+function responsesTerminalDiagnosis(json: Record<string, unknown>): string | null {
+    const status = typeof json.status === "string" ? json.status : undefined;
+    if (status !== "incomplete" && status !== "failed") return null;
+    if (!Array.isArray(json.output) && typeof json.output_text !== "string") return null;
+    const parts: string[] = [`status=${status}`];
+    if (status === "incomplete") {
+        const details = json.incomplete_details;
+        const reason = details && typeof details === "object" && typeof (details as Record<string, unknown>).reason === "string"
+            ? (details as Record<string, unknown>).reason as string
+            : undefined;
+        if (reason) parts.push(`reason=${reason}`);
+    } else {
+        const e = json.error;
+        if (e && typeof e === "object") {
+            const eo = e as Record<string, unknown>;
+            if (typeof eo.code === "string") parts.push(eo.code);
+            if (typeof eo.message === "string") parts.push(eo.message.slice(0, 200));
+        }
+    }
+    const article = status === "incomplete" ? "an" : "a";
+    return `the upstream returned ${article} ${status} Responses summary (${parts.join(", ")})`;
+}
+
 // #1767: classify a diagnosis from diagnoseEmptySummary. Only explicit SIZE
 // signals mean "the span is too big" (halving is the recovery — #726); every
 // other empty shape (content_filter, empty body, truncated stream, in-stream
@@ -695,12 +755,20 @@ function extractStreamError(o: Record<string, unknown>): string | null {
 // diagnosis strings are test-pinned, so matching them keeps the classifier in
 // lockstep with what the operator sees.
 export function emptySummaryIsSizeDriven(diagnosis: string): boolean {
-    return /context_length_exceeded|too long|finish_reason=length\b|stop_reason=max_tokens\b/i.test(diagnosis);
+    // #2309: reason=max_output_tokens is the Responses-side spelling of the
+    // same size signal — the span outgrew the summarizer's output budget.
+    return /context_length_exceeded|too long|finish_reason=length\b|stop_reason=max_tokens\b|reason=max_output_tokens\b/i.test(diagnosis);
 }
 
 export function diagnoseEmptySummary(text: string, json?: unknown): string {
     if (json && typeof json === "object") {
-        const err = extractStreamError(json as Record<string, unknown>);
+        // #2309: the Responses terminal check runs FIRST — a failed response
+        // also carries a top-level error object that extractStreamError would
+        // otherwise claim with the weaker bare-error framing.
+        const o = json as Record<string, unknown>;
+        const terminal = responsesTerminalDiagnosis(o);
+        if (terminal) return terminal;
+        const err = extractStreamError(o);
         if (err) return err;
     }
     let sseEvents = 0;
@@ -778,6 +846,13 @@ async function summarizeRange(deps: PreflightDeps, content: string, startRef: st
         (lengthBudget !== undefined && lengthBudget >= MIN_SUMMARY_CHARS
             ? `\n\nLENGTH BUDGET: Your ENTIRE response must be AT MOST ${lengthBudget} characters total — longer output is rejected by the pipeline. Be dense: compact bullets, no filler or repetition.`
             : "");
+    if (deps.externalSummary) {
+        const batch = await deps.externalSummary.summarize([{ instructions: system, content, minSummaryChars: MIN_SUMMARY_CHARS,
+            maxSummaryChars: deps.config.compress.maxSummaryLength }], deps.signal);
+        const result = batch.results[0];
+        return result?.status === "success" ? { summary: result.summary }
+            : { unusable: "configured external summary candidates failed or exceeded their budget", transient: false };
+    }
     // #626: the session remembers upstreams that require stream:true, so the
     // extra 400 round-trip is paid at most once per session (persisted with
     // the session metadata). #663: likewise, per URL+model, upstreams that
@@ -1012,6 +1087,17 @@ export async function preflightCompress(deps: PreflightDeps, messages: CoreMessa
     let textTarget = Math.max(0, Math.min(limit, deps.compressionTarget ?? limit) - imageReserve);
     const result: PreflightResult = { compressedRanges: 0, savedTokens: 0, payloadEstimate: applyEstimateCalibration(estimateCoreMessages(messages) + wireOverhead, kFactor, kOrigin, deps.upstreamOrigin) + imageReserve, rangesRemaining: 0, fitsWindow: true };
     if (limit <= 0) return result;
+    if (deps.externalSummary === undefined) {
+        try {
+            // The plan rides the request Config rail: deps.config is this
+            // request's resolved Config (three-level cascade), so the plan
+            // always matches the settings the wire path itself resolved.
+            deps = { ...deps, externalSummary: configuredSummaryPlan((deps.config as ResolvedKernelConfig).externalSummary) };
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            deps.log("warn", `[external-summary] configuration unavailable; using legacy preflight: ${detail}`);
+        }
+    }
     const budget = Math.max(MIN_CHUNK_TOKENS, Math.floor(limit * CHUNK_FRACTION));
     // applyCompression rejects ranges below config.compress.minCompressRange
     // chars, so never spend a summarization call on a chunk that can't apply.

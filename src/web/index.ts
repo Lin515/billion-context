@@ -4,6 +4,7 @@ import { VERSION } from "../version.js";
 export {
     handleConfigGet,
     handleConfigPut,
+    handleSummaryCredentialPut,
     readProviders,
     readUpstreamSettings,
 } from "./api.js";

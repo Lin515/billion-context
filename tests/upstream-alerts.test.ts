@@ -172,6 +172,7 @@ async function startProxyFor(upstreamPort: number, registerRoute: boolean): Prom
         port: 0,
         host: "127.0.0.1",
         upstream: `http://127.0.0.1:${upstreamPort}`,
+        proxy: "",
         routes: registerRoute ? { [`http://127.0.0.1:${upstreamPort}`]: { models: { "gpt-test": { context: 400_000 } } } } : {},
         modelContextLimit: 400_000,
         kernelConfig: defaultConfig(400_000),
@@ -190,6 +191,7 @@ async function startProxyFor(upstreamPort: number, registerRoute: boolean): Prom
         advisoryCheck: false,
         releaseNotesCheck: false,
         mitm: { enabled: false, domains: [] },
+        proxyFallback: { explicitDirect: true, globalSource: "direct" },
     };
     const proxy = await startServer(opts);
     await once(proxy, "listening");

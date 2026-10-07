@@ -7,9 +7,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isPidAlive, listInstances, procMainScript } from "./instance.js";
-import { PLUGIN_AGENTS, UPDATE_CHANNEL, inspectLanePresence, type PluginAgent } from "./plugin-install.js";
+import { PLUGIN_AGENTS, UPDATE_CHANNEL, claudeDesktopPresent, inspectLanePresence, type PluginAgent } from "./plugin-install.js";
 import { findInstallDir, fetchRegistryVersion, hostManagedInstall, isGitWorkingTree, isVersionNewer, lastUpdateCheckTime, normalizeUpdateTag, staleInstallStatus } from "./update.js";
 import { describeAdvisory, evaluateAdvisories, type AdvisoryEvaluation } from "./advisory.js";
+import { claudeRoutingWarningFile } from "./paths.js";
 
 type LaneVerdict = "ok" | "stale" | "frozen" | "broken" | "absent";
 
@@ -40,6 +41,9 @@ export interface DoctorLane {
     channel?: string;
     verdict: LaneVerdict;
     reason?: string;
+    /** Advisory notes that do not affect the verdict — e.g. #2290: the claude
+     *  lane is healthy, but a co-installed Claude Desktop will bypass it. */
+    warnings?: string[];
 }
 
 export interface DoctorProcess {
@@ -214,6 +218,27 @@ function laneRowsFor(agent: PluginAgent, presence: ReturnType<typeof inspectLane
         const p = presence.targets[0] !== undefined ? ` (${presence.targets[0]})` : "";
         row.detail += `; cache copy${p}${cp} is bili-owned and self-updates in place via its own proxy (#1234) — reload/restart OpenCode to activate a disk update`;
     }
+    if (agent === "claude" && presence.installed) {
+        // #2290: the lane itself is healthy, but a co-installed Claude Desktop
+        // overrides the managed ANTHROPIC_BASE_URL — desktop sessions then get
+        // neither bili compression nor native auto-compact. Advisory only: never
+        // change the verdict. Two sources: standing disk evidence + the last
+        // hook-detected bypass (its stderr is invisible outside debug mode).
+        const warnings: string[] = [];
+        if (claudeDesktopPresent()) {
+            warnings.push("Claude Desktop detected on this machine: its Code tab overrides ANTHROPIC_BASE_URL, so desktop sessions bypass bili entirely AND lose native auto-compact (managed block sets DISABLE_AUTO_COMPACT=1) — #2290");
+        }
+        try {
+            const rec = JSON.parse(fs.readFileSync(claudeRoutingWarningFile(), "utf8")) as { at?: unknown; reasons?: unknown };
+            if (Array.isArray(rec.reasons) && rec.reasons.length > 0 && rec.reasons.every((r) => typeof r === "string")) {
+                const at = typeof rec.at === "number" ? ` at ${new Date(rec.at).toISOString()}` : "";
+                warnings.push(`last SessionStart hook detected a routing bypass${at}: ${(rec.reasons as string[]).join("; ")}`);
+            }
+        } catch {
+            // no marker or unreadable — nothing to surface
+        }
+        if (warnings.length > 0) row.warnings = warnings;
+    }
     return [row];
 }
 
@@ -248,6 +273,7 @@ export function renderDoctorReport(report: DoctorReport): string {
         lines.push(`  ${"".padEnd(12)} ${"".padEnd(34)} ${lane.detail}`);
         if (lane.channel !== undefined && lane.installed) lines.push(`  ${"".padEnd(12)} ${"".padEnd(34)} updates via: ${lane.channel}`);
         if (lane.reason !== undefined) lines.push(`  ${"".padEnd(12)} ${"".padEnd(34)} ${lane.reason}`);
+        for (const w of lane.warnings ?? []) lines.push(`  ${"".padEnd(12)} ${"".padEnd(34)} ⚠️ ${w}`);
     }
     lines.push("");
     lines.push("processes");

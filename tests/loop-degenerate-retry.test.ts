@@ -103,7 +103,7 @@ test("#732 D1: degenerate post-compress turn → one invisible retry with a cont
     assert.equal(fetchCalls, 2, "re-request + exactly one degenerate auto-retry");
     assert.ok(bodies.length >= 2, "both requests observed");
     assert.ok(
-        bodies[1].includes("no visible text and no tool call"),
+        bodies[1].includes("ended without a tool call"),
         "the retry body carries the ephemeral continuation nudge",
     );
     assert.ok(out.includes("continued after nudge"), "the retried turn's content was delivered to the client");
@@ -175,7 +175,7 @@ test("#821 O1: openai-wire round-1 thinking-only turn → one auto-retry appende
     const { out, fetchCalls, bodies } = await drainOpenai(OPENAI_THINKING_ONLY, [OPENAI_GOOD], "deg-o1");
     assert.equal(fetchCalls, 1, "exactly one degenerate auto-retry fired");
     assert.ok(
-        bodies[0].includes("no visible text and no tool call"),
+        bodies[0].includes("ended without a tool call"),
         "the retry body carries the ephemeral continuation nudge",
     );
     assert.ok(out.includes("the context looks small"), "the thinking prefix was streamed to the client");

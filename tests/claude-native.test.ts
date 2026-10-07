@@ -19,6 +19,7 @@ import {
     claudeSettingsFile,
     claudeNativeBaseUrlForOrigin,
     unwrapBiliBaseUrl,
+    claudeDesktopPresent,
     isBiliClaudeBaseUrl,
     pluginInstall,
     pluginRemove,
@@ -28,7 +29,8 @@ import {
 } from "../src/plugin-install.ts";
 import { ensureRootCA } from "../src/ca.ts";
 import { ZONE_PORT_BASE, resolveClaudeNativePort, resolveNativeAttachExternal } from "../src/config.ts";
-import { chooseWatchdogParentPid, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, readWinProcInfo, resolveClaudeHostPid, splitWindowsCommandLine } from "../src/claude-native-bootstrap.ts";
+import { chooseWatchdogParentPid, claudeNativeRoutingCheck, isClaudeHostArgv, isTransientShArgv, planClaudeNativeBootstrap, readPsProcInfo, recordClaudeRoutingWarning, readWinProcInfo, resolveClaudeHostPid, splitWindowsCommandLine } from "../src/claude-native-bootstrap.ts";
+import { claudeRoutingWarningFile } from "../src/paths.ts";
 import { rmrf } from "./tmp-rm.ts";
 
 // #1248: the live tests below spawn real proxies/processes and observe real
@@ -880,6 +882,83 @@ test("installer refuses malformed settings.json instead of overwriting", () => {
         else process.env.CLAUDE = prevClaude;
         if (prevOpt === undefined) delete process.env.BILI_NATIVE_CLAUDE;
         else process.env.BILI_NATIVE_CLAUDE = prevOpt;
+    }
+});
+
+// — routing bypass detection (#2290) ————————————————————————————
+
+test("claudeNativeRoutingCheck: claude-desktop entrypoint is a bypass; other entrypoints are not", () => {
+    const hit = claudeNativeRoutingCheck({ CLAUDE_CODE_ENTRYPOINT: "claude-desktop" });
+    assert.equal(hit.bypassed, true);
+    assert.equal(hit.reasons.length, 1);
+    assert.match(hit.reasons[0]!, /CLAUDE_CODE_ENTRYPOINT=claude-desktop/);
+    // Case/whitespace tolerant.
+    assert.equal(claudeNativeRoutingCheck({ CLAUDE_CODE_ENTRYPOINT: " Claude-Desktop " }).bypassed, true);
+    // Evidence-based permitlist: known/other hosts must NOT fire.
+    for (const v of ["cli", "vscode", "sdk-cli", "claude-code", ""]) {
+        assert.equal(claudeNativeRoutingCheck({ CLAUDE_CODE_ENTRYPOINT: v }).bypassed, false, `entrypoint ${JSON.stringify(v)} must stay silent`);
+    }
+    assert.equal(claudeNativeRoutingCheck({}).bypassed, false);
+});
+
+test("claudeNativeRoutingCheck: non-bili ANTHROPIC_BASE_URL fires; bili URL and healthy sessions do not", () => {
+    // The desktop shape: host-injected direct upstream wins over settings.json.
+    const hit = claudeNativeRoutingCheck({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
+    assert.equal(hit.bypassed, true);
+    assert.match(hit.reasons[0]!, /ANTHROPIC_BASE_URL=https:\/\/api\.anthropic\.com/);
+    // A managed URL (any loopback port) is healthy routing.
+    assert.equal(claudeNativeRoutingCheck({ ANTHROPIC_BASE_URL: baseUrlForPort(18787) }).bypassed, false);
+    // Healthy terminal session: claude does not inject settings.env into hook
+    // children, so the var is absent unless something external set it.
+    assert.equal(claudeNativeRoutingCheck({}).bypassed, false);
+    assert.equal(claudeNativeRoutingCheck({ ANTHROPIC_BASE_URL: "   " }).bypassed, false);
+    // Both signals at once → both reasons.
+    const both = claudeNativeRoutingCheck({ CLAUDE_CODE_ENTRYPOINT: "claude-desktop", ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
+    assert.equal(both.bypassed, true);
+    assert.equal(both.reasons.length, 2);
+});
+
+test("#2290 marker round-trip: recordClaudeRoutingWarning writes what doctor reads, latest wins, never throws", () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), "bc-claude-route-mark-"));
+    const prev = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+        recordClaudeRoutingWarning(["reason one"]);
+        const rec = JSON.parse(fs.readFileSync(claudeRoutingWarningFile(), "utf8")) as { at: number; reasons: string[] };
+        assert.deepEqual(rec.reasons, ["reason one"]);
+        assert.ok(Number.isFinite(rec.at));
+        recordClaudeRoutingWarning(["reason two", "reason three"]);
+        const rec2 = JSON.parse(fs.readFileSync(claudeRoutingWarningFile(), "utf8")) as { reasons: string[] };
+        assert.deepEqual(rec2.reasons, ["reason two", "reason three"]);
+        // Unwritable location must not throw — the hook must never fail claude.
+        const blocker = path.join(state, "blocker");
+        fs.writeFileSync(blocker, "x");
+        process.env.XDG_STATE_HOME = path.join(blocker, "sub");
+        assert.doesNotThrow(() => recordClaudeRoutingWarning(["never thrown"]));
+    } finally {
+        if (prev === undefined) delete process.env.XDG_STATE_HOME;
+        else process.env.XDG_STATE_HOME = prev;
+        rmrf(state);
+    }
+});
+
+test("claudeDesktopPresent: per-platform install locations, injectable inputs", () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "bc-claude-desktop-"));
+    try {
+        const lad = path.join(base, "lad");
+        fs.mkdirSync(path.join(lad, "Programs", "Claude"), { recursive: true });
+        assert.equal(claudeDesktopPresent({ platform: "win32", localAppData: lad }), true);
+        assert.equal(claudeDesktopPresent({ platform: "win32", localAppData: path.join(base, "empty") }), false);
+        assert.equal(claudeDesktopPresent({ platform: "win32", localAppData: "" }), false);
+        const appRoot = path.join(base, "apps");
+        fs.mkdirSync(path.join(appRoot, "Claude.app"), { recursive: true });
+        assert.equal(claudeDesktopPresent({ platform: "darwin", appRoots: [appRoot], home: path.join(base, "home") }), true);
+        assert.equal(claudeDesktopPresent({ platform: "darwin", appRoots: [path.join(base, "none")], home: path.join(base, "home") }), false);
+        fs.mkdirSync(path.join(base, "home", "Applications", "Claude.app"), { recursive: true });
+        assert.equal(claudeDesktopPresent({ platform: "darwin", appRoots: [path.join(base, "none")], home: path.join(base, "home") }), true);
+        assert.equal(claudeDesktopPresent({ platform: "linux", localAppData: lad }), false);
+    } finally {
+        rmrf(base);
     }
 });
 
