@@ -16,9 +16,13 @@ import {
   builtinSource,
   createDirPackSource,
   createPackResolver,
+  createDirPackSource,
   defaultPackSources,
   applyAcpToolOverrides,
   buildCompressSystemPrompt,
+  buildCompressTextSystemPrompt,
+  buildCompressHybridSystemPrompt,
+  defaultPrompts,
   ACP_TOOLS_OPENAI,
   type Pack,
   type PackSource,
@@ -413,6 +417,58 @@ test("pack promptSections flow into buildCompressSystemPrompt", () => {
   );
   assert.ok(text.includes("TOOLS-OVERRIDE"));
   assert.ok(!text.includes("COMPRESSION SUMMARIES IN CONTEXT"));
+});
+
+test("#2335: lean pack's TOP-LEVEL promptSections drive the proxy builders — condensed contract + recall discipline reach every host", () => {
+  const sections = leanPack.surface.promptSections;
+  assert.ok(sections, "lean surface has top-level promptSections");
+  for (const built of [
+    buildCompressSystemPrompt(undefined, sections),
+    buildCompressTextSystemPrompt(undefined, sections),
+    buildCompressHybridSystemPrompt(undefined, sections),
+  ]) {
+    assert.ok(built.includes("Your summary is the ONLY record"), "lean condensed contract (LEAN_HOW_TO_COMPRESS) present");
+    assert.ok(built.includes("Recall on demand only"), "recall discipline present");
+    assert.ok(built.includes("read that file"), "file-pointer discipline present");
+    assert.ok(!built.includes("Compression Philosophy:"), "default philosophy removed (lean nulls it)");
+    assert.ok(!/ACP TAGS\n\nEach message in the conversation is annotated/.test(built), "default acpTags replaced by the lean rules");
+  }
+  // toolPrompts stay lean one-liners independent of this change
+  const tools = applyAcpToolOverrides(ACP_TOOLS_OPENAI, leanPack.surface.toolPrompts);
+  assert.ok(JSON.stringify(tools).includes("batch multiple ranges into ONE call"));
+});
+
+test("#2335: no-override builder output stays byte-identical (philosophy/howToCompress as tri-state sections must not drift)", () => {
+  // The old builders hardcoded [prompts.compressPhilosophy, prompts.howToCompressRules, ...sections];
+  // the section-list form must reproduce exactly that for every builder.
+  const prompts = defaultPrompts;
+  const expectFunction = [prompts.compressPhilosophy, prompts.howToCompressRules].join("\n\n");
+  const builtFunction = buildCompressSystemPrompt(prompts);
+  assert.ok(builtFunction.startsWith(expectFunction));
+  const builtText = buildCompressTextSystemPrompt(prompts);
+  assert.ok(builtText.startsWith(expectFunction));
+  const builtHybrid = buildCompressHybridSystemPrompt(prompts);
+  assert.ok(builtHybrid.startsWith(expectFunction));
+});
+
+test("#2335: file packs may trim philosophy/howToCompress (sanitize whitelist widened)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "acp-packs-lead-"));
+  try {
+    writeFileSync(
+      path.join(dir, "lead.json"),
+      JSON.stringify({
+        promptSections: { philosophy: null, howToCompress: "CONDENSED-CONTRACT" },
+      }),
+    );
+    const resolver = createPackResolver(defaultPackSources({ projectDir: dir }));
+    const pack = resolver.resolve("lead");
+    assert.ok(pack);
+    const built = buildCompressSystemPrompt(undefined, pack!.surface.promptSections);
+    assert.ok(built.includes("CONDENSED-CONTRACT"));
+    assert.ok(!built.includes("Compression Philosophy:"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("file pack round-trips through dir source into resolver", () => {

@@ -273,11 +273,17 @@ export function buildCompressSystemPrompt(
   prompts: Prompts = defaultPrompts,
   sections?: CompressPromptSections,
 ): string {
-  return [
-    prompts.compressPhilosophy,
-    prompts.howToCompressRules,
-    ...applySectionOverrides(FUNCTION_PROMPT_SECTIONS, sections),
-  ].join("\n\n");
+  // #2335: philosophy/howToCompress are tri-state sections (packs may replace
+  // or drop them — lean does); defaults still come from the passed `prompts`
+  // so the no-override output is byte-identical to the old hardcoded form.
+  return applySectionOverrides(
+    [
+      ["philosophy", prompts.compressPhilosophy],
+      ["howToCompress", prompts.howToCompressRules],
+      ...FUNCTION_PROMPT_SECTIONS,
+    ],
+    sections,
+  ).join("\n\n");
 }
 
 /** Text-protocol compress prompt. Used when the host (e.g. OpenAI Codex
@@ -340,9 +346,14 @@ export function buildCompressTextSystemPrompt(
   sections?: CompressPromptSections,
 ): string {
   return [
-    prompts.compressPhilosophy,
-    prompts.howToCompressRules,
-    ...applySectionOverrides(TEXT_PROMPT_SECTIONS, sections),
+    ...applySectionOverrides(
+      [
+        ["philosophy", prompts.compressPhilosophy],
+        ["howToCompress", prompts.howToCompressRules],
+        ...TEXT_PROMPT_SECTIONS,
+      ],
+      sections,
+    ),
   ].join("\n\n");
 }
 
@@ -394,9 +405,14 @@ export function buildCompressHybridSystemPrompt(
   sections?: CompressPromptSections,
 ): string {
   return [
-    prompts.compressPhilosophy,
-    prompts.howToCompressRules,
-    ...applySectionOverrides(HYBRID_PROMPT_SECTIONS, sections),
+    ...applySectionOverrides(
+      [
+        ["philosophy", prompts.compressPhilosophy],
+        ["howToCompress", prompts.howToCompressRules],
+        ...HYBRID_PROMPT_SECTIONS,
+      ],
+      sections,
+    ),
   ].join("\n\n");
 }
 

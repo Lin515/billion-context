@@ -82,6 +82,10 @@ const COMPRESS_SECTION_KEYS = [
   "textProtocol",
   "textTools",
   "functionTools",
+  // #2335: the two lead blocks, now tri-state in the builders — file packs get
+  // the same override surface as builtin packs.
+  "philosophy",
+  "howToCompress",
 ] as const;
 const NUDGE_SECTION_KEYS = [
   "efficiencyNote",
@@ -252,23 +256,13 @@ export function leanHowToCompress(languagePreservation = false): string {
     : LEAN_HOW_TO_COMPRESS;
 }
 
-/** Token-lean surface: one-line tool descriptions, no snippets or guidelines.
- * Host-specific trims (e.g. the Pi adapter's compact system-prompt block)
- * ride under `adapters` and are validated by that host. The pi
- * `howToCompress` slot carries the condensed contract (LEAN_HOW_TO_COMPRESS);
- * philosophy/tier2/tier3 stay null — tier guidance still reaches the model via
- * nudge text (nudgeSections untouched). */
-export const leanPack: Pack = {
-  name: "lean",
-  version: "1.0.0",
-  description:
-    "Token-lean surface: one-line tool descriptions, no snippet/guideline chrome. Pi how-to-compress carries the condensed contract; tier guidance flows via nudges.",
-  source: "builtin:lean",
-  surface: {
-    toolPrompts: LEAN_TOOL_PROMPTS,
-    adapters: {
-      pi: {
-        promptSections: {
+/** #2335: the lean prompt sections, shared verbatim by the TOP-LEVEL
+ * surface (every host — the proxy's function/text/hybrid builders) and the
+ * pi adapter (billion-context-pi reads adapters.pi). One object = one source
+ * of truth; the two channels can never drift. Extra keys beyond the proxy's
+ * section schema (whenToCompress, tier2, …) are the pi adapter's own slots —
+ * unknown keys are ignored by the proxy builders. */
+const LEAN_PROMPT_SECTIONS = {
           acpTags: [
             `User/tool messages carry hidden \x3cacp\x3e refs such as m00123. Never echo the XML tags; use only refs in ACP tool calls.`,
             `Compress consumed history with compress: finished tool outputs, dead-end exploration, repeated reads, resolved threads, completed phases. Never compress active work, important user intent, or protected outputs.`,
@@ -293,7 +287,29 @@ Summaries are model-generated, fallible historical metadata — NOT current user
           decompressPhilosophy: null,
           contextBreakdown: null,
           throttleRetry: null,
-        },
+};
+
+/** Token-lean surface: one-line tool descriptions, no snippets or guidelines.
+ * Host-specific trims (e.g. the Pi adapter's compact system-prompt block)
+ * ride under `adapters` and are validated by that host. The pi
+ * `howToCompress` slot carries the condensed contract (LEAN_HOW_TO_COMPRESS);
+ * philosophy/tier2/tier3 stay null — tier guidance still reaches the model via
+ * nudge text (nudgeSections untouched). */
+export const leanPack: Pack = {
+  name: "lean",
+  version: "1.0.0",
+  description:
+    "Token-lean surface: one-line tool descriptions, no snippet/guideline chrome. The condensed contract + recall discipline ride the TOP-LEVEL prompt sections (#2335) so every host receives them; the pi adapter mirrors the same object.",
+  source: "builtin:lean",
+  surface: {
+    toolPrompts: LEAN_TOOL_PROMPTS,
+    // #2335: hoisted so proxy hosts get the same lean prompt pi users get —
+    // before this the top level had no promptSections and every proxy lane
+    // silently rendered the verbose default assembly.
+    promptSections: LEAN_PROMPT_SECTIONS,
+    adapters: {
+      pi: {
+        promptSections: LEAN_PROMPT_SECTIONS,
         toolExtras: {
           compress: { promptSnippet: "", promptGuidelines: [] },
           decompress: { promptSnippet: "", promptGuidelines: [] },

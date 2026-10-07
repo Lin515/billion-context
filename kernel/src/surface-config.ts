@@ -33,6 +33,14 @@ export type CompressPromptSections = {
   textProtocol?: SectionOverride;
   textTools?: SectionOverride;
   functionTools?: SectionOverride;
+  /** #2335: the two lead blocks the builders used to hardcode from
+   * `prompts.*`. Tri-state like every other section so a pack can trim the
+   * verbose default assembly (lean) without touching the load-bearing
+   * `Prompts` rules. Default text still resolves from the passed `prompts`
+   * (risk-gated via resolvePrompts), keeping no-override output
+   * byte-identical. */
+  philosophy?: SectionOverride;
+  howToCompress?: SectionOverride;
 };
 
 /** Per-tool surface overrides. Keyed by tool name (see ACP_TOOL_NAMES). */
