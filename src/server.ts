@@ -50,7 +50,7 @@ import {
 import { responsesToCoreWithToolImages as responsesToCore, patchResponsesInputWithToolImages as patchResponsesInput, mergeAdjacentConfigurationUpdates } from "./responses-tool-output.js";
 import { reconcileFoldCoverage, noteSystemPromptFingerprint, resolveFoldReconcileMode } from "./fold-reconcile.js";
 import { biliToolsDeclaredOnWire, countBiliToolUses, evaluateSelfHealRound, nudgeSuppressed, pluginLaneDegraded, pluginLaneRestore } from "./session-self-heal.js";
-import { diagnoseSuccessWithoutUsage, getSession, hasProcessedState, listSessions, peekSession, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig, foldCoverage, postRebuildAnchorTokens, setPostRebuildAnchor, tickPostRebuildAnchor, splitSessionWarnings, REWRITE_MIN_INCOMING_TOTAL } from "./session.js";
+import { diagnoseSuccessWithoutUsage, getSession, hasProcessedState, listSessions, peekSession, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, withSessionLock, markNativeCompactionBoundary, reconcileNativeCompactionBoundary, resetSessionCompression, detectLocalCompactionRewrite, snapshotMessages, applyCompactionArchive, detectUnannouncedHistoryRewrite, markCompactionBoundary, ensureCanonicalId, storeEffectiveConfig, foldCoverage, postRebuildAnchorTokens, setPostRebuildAnchor, tickPostRebuildAnchor, splitSessionWarnings, REWRITE_MIN_INCOMING_TOTAL } from "./session.js";
 import { detectStaleInstall } from "./update.js";
 import { getAdvisoryState, cannotResolveTarget } from "./advisory.js";
 import { PACKAGE_NAME, VERSION } from "./version.js";
@@ -4696,6 +4696,21 @@ async function prepareResponses(
         const absorbActive = absorbBlock?.enabled === true && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
         const rulesActive = rulesEnabled(config) && shouldInject && !isCompactionTrigger && !responsesTextProtocol;
         const loopConfig = ccrLoopConfig(session, { ...config, absorb: absorbActive ? absorbBlock : undefined });
+        // #2372: Codex LOCAL auto-compaction replaces the early history client-
+        // side (retained tail + summary) with no /responses/compact to key off —
+        // without this the dead fold coverage persists into "substrate destroyed"
+        // forever. Rebase to the compacted history with the SAME primitive the
+        // announced path uses, BEFORE processTurn seeds the fresh substrate.
+        if (!pluginMode && !isCompactionTrigger) {
+            const localCompact = detectLocalCompactionRewrite(session, msgs);
+            if (localCompact.detected) {
+                resetSessionCompression(session);
+                const now = Date.now();
+                session.metadata.nativeCompactionBoundary = { at: now, rebasedAt: now, pendingRebase: false, source: "local-compaction-detected", coveredLost: localCompact.lost };
+                recordConflict(session, "native-compaction", `local auto-compaction: ${localCompact.lost}/${localCompact.covered} covered id(s) dropped off the wire, history ${localCompact.prevTotal ?? "?"}→${localCompact.incomingTotal} msg(s) — fold substrate rebased (#2372)`);
+                log("warn", `[${sessionId}] codex local auto-compaction detected (${localCompact.lost}/${localCompact.covered} covered id(s) lost, history ${localCompact.prevTotal ?? "?"}→${localCompact.incomingTotal} msgs) — rebasing fold substrate to the compacted history (#2372)`);
+            }
+        }
         // [#1921] re-anchor fold coverage onto churned-but-same messages
         // before the #1195 snapshot, so covered ids surviving a client
         // re-serialization stay covered (src/fold-reconcile.ts).

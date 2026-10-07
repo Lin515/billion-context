@@ -1107,6 +1107,51 @@ export function detectUnannouncedHistoryRewrite(
     return { detected, knownBefore, incomingTotal, knownIncoming };
 }
 
+// #2372: Codex LOCAL auto-compaction (a `{type:"compacted"}` rollout event — not
+// a `/responses/compact` request nor a `compaction_trigger` item) replaces the
+// early history CLIENT-side with a retained tail + one summary. No announced-
+// boundary machinery keys off it, so nothing rebases the fold state and
+// fold-reconcile escalates to "substrate destroyed" forever (#2193 logged it,
+// never healed it). detectUnannouncedHistoryRewrite misses this too: its metric
+// is the fraction of INCOMING carrying pre-turn refs, which stays high because
+// the retained tail dominates the shrunken history. We invert the direction —
+// how much of what we FOLDED vanished — plus a strict SHRINKAGE gate (a
+// compaction deletes → count drops; an edit holds count ~stable, an append
+// grows it). All three gates must hold so genuine edits/churn are never rebased.
+interface LocalCompactionDetection {
+    detected: boolean;
+    covered: number;
+    present: number;
+    lost: number;
+    incomingTotal: number;
+    prevTotal: number | undefined;
+}
+
+const COMPACTION_MIN_COVERED = 16;   // must have had real folds to lose
+const COMPACTION_MAX_SURVIVAL = 0.5; // at least half of folded content gone
+
+export function detectLocalCompactionRewrite(session: Session, msgs: CoreMessage[]): LocalCompactionDetection {
+    const covered = new Set<string>();
+    for (const b of session.state?.blocks ?? []) {
+        if (!b.active) continue;
+        for (const id of b.effectiveMessageIds) covered.add(id);
+    }
+    const incoming = new Set(msgs.map((m) => m.id));
+    let present = 0;
+    for (const id of covered) if (incoming.has(id)) present++;
+    const incomingTotal = msgs.length;
+    const order = Array.isArray(session.metadata?.foldAnchorOrder) ? (session.metadata!.foldAnchorOrder as string[]) : undefined;
+    const prevTotal = order && order.length > 0 ? order.length : Array.isArray(session.lastMessages) ? session.lastMessages.length : undefined;
+    const survival = covered.size > 0 ? present / covered.size : 1;
+    // Strict shrinkage: current history shorter than the previous real pass.
+    // Without a prior length (first turn / reconcile off with no lastMessages)
+    // we cannot confirm the shape → stay undetected (conservative).
+    const detected = covered.size >= COMPACTION_MIN_COVERED &&
+        survival <= COMPACTION_MAX_SURVIVAL &&
+        prevTotal !== undefined && incomingTotal < prevTotal;
+    return { detected, covered: covered.size, present, lost: covered.size - present, incomingTotal, prevTotal };
+}
+
 /** #1195: message ids are content hashes — if a client resends history whose
  *  bytes changed (resume/re-serialization, edit, duplicate-cluster shift), the
  *  ids of compressed-range messages no longer match the block's covered set,
