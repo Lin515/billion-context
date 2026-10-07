@@ -16,7 +16,6 @@ import {
   builtinSource,
   createDirPackSource,
   createPackResolver,
-  createDirPackSource,
   defaultPackSources,
   applyAcpToolOverrides,
   buildCompressSystemPrompt,
