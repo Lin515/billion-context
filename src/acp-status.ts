@@ -37,6 +37,33 @@ function fmtBytes(n: number): string {
     return `${(n / (1024 * 1024)).toFixed(1)}MiB`;
 }
 
+// #2362: render dead refs as compact ref spans ("m09539, m09543–m09558").
+function formatDeadRefSpans(refs: string[]): string {
+    const nums = refs
+        .map((r) => Number(r.replace(/\D/g, "")))
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b);
+    const f = (n: number): string => `m${String(n).padStart(5, "0")}`;
+    const spans: string[] = [];
+    let start = -1;
+    let prev = -1;
+    const flush = (): void => {
+        if (start < 0) return;
+        spans.push(start === prev ? f(start) : `${f(start)}–${f(prev)}`);
+    };
+    for (const n of nums) {
+        if (prev >= 0 && n === prev + 1) {
+            prev = n;
+            continue;
+        }
+        flush();
+        start = n;
+        prev = n;
+    }
+    flush();
+    return spans.length > 8 ? `${spans.slice(0, 8).join(", ")} (+${spans.length - 8} more)` : spans.join(", ");
+}
+
 export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx): ProxyToolResult {
     const scope = typeof args.scope === "string" ? (args.scope as "compressed" | "uncompressed") : undefined;
     const view = typeof args.view === "string" ? (args.view as "ranges" | "messages") : undefined;
@@ -82,6 +109,15 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         }
     } catch {
         // Base-only report; never fall back to a stale snapshot.
+    }
+    // #2362: dead refs — known to the session but no longer backed by any
+    // visible or folded message (client history rewrite / host-native
+    // compaction). Failure receipts point the model at acp_status, so this is
+    // the canonical surface where the dead set must be visible.
+    const deadRefs = ctx.session.state.deadRefs;
+    if (deadRefs !== undefined && deadRefs.length > 0) {
+        extra.push("");
+        extra.push(`DEAD REFS — ${deadRefs.length} ref(s) no longer back any visible or folded message (the client history no longer carries them — host-native compaction or a bulk rewrite). Ranges citing them can NEVER compress; target only the live refs listed above: ${formatDeadRefSpans(deadRefs)}`);
     }
     // #1097: the processTurn above already resolved the envelope when armed
     // (contentStoreOf is idempotent); when disarmed skip the disk read.

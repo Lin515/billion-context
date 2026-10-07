@@ -90,7 +90,7 @@ function refNum(ref: string): number {
  *  retry loop without another round-trip. Boundary counts ACTIVE blocks
  *  only — after a decompress (blocks inactive) the restored span shows as
  *  compressible again, which is exactly the recoverable truth. */
-export function compressibleSpanHint(state: Pick<CompressionState, "messageRefs" | "blocks">): string {
+export function compressibleSpanHint(state: Pick<CompressionState, "messageRefs" | "blocks" | "deadRefs">): string {
     const refs = Object.keys(state.messageRefs?.byRef ?? {});
     const highest = refs.reduce((m, r) => Math.max(m, r.startsWith("m") ? Number(r.slice(1)) || 0 : 0), 0);
     const boundary = state.blocks.reduce((m, b) => (b.active && b.endRef?.startsWith("m") ? Math.max(m, Number(b.endRef.slice(1)) || 0) : m), 0);
@@ -104,7 +104,29 @@ export function compressibleSpanHint(state: Pick<CompressionState, "messageRefs"
     // (e.g. m05027–m05052 between two blocks) is still compressible raw space, so
     // claiming "everything up to N is inside blocks" misleads models into skipping it.
     const covered = boundary > 0 ? ` (refs up to ${fmt(boundary)} are largely inside active blocks; isolated free gaps may still exist below it)` : "";
-    return ` Live compressible refs: ${fmt(boundary + 1)}–${fmt(highest)}${covered}. Retry NOW in this same turn with startId/endId inside that span.`;
+    // #2362: dead refs (the client history no longer carries their messages)
+    // can never compress — subtract them from the advertised span so a retry
+    // does not steer the model back into a doomed range (self-amplifying loop).
+    const dead = new Set<number>();
+    for (const r of state.deadRefs ?? []) {
+        const n = Number(r.replace(/\D/g, ""));
+        if (Number.isFinite(n) && n > boundary && n <= highest) dead.add(n);
+    }
+    const spans: string[] = [];
+    let cursor = boundary + 1;
+    for (const d of [...dead].sort((a, b) => a - b)) {
+        if (d > cursor) spans.push(cursor === d - 1 ? fmt(cursor) : `${fmt(cursor)}–${fmt(d - 1)}`);
+        cursor = d + 1;
+        if (cursor > highest) break;
+    }
+    if (cursor <= highest) spans.push(cursor === highest ? fmt(cursor) : `${fmt(cursor)}–${fmt(highest)}`);
+    if (spans.length === 0) {
+        return ` No live raw refs right now: every ref between ${fmt(boundary + 1)} and ${fmt(highest)} is DEAD — the client history no longer carries those messages (host-native compaction or a bulk rewrite), so no range citing them can ever compress. Compress a run of ACTIVE blocks instead or work within your current visible context.`;
+    }
+    const deadNote = dead.size > 0
+        ? ` Excluded as DEAD (${dead.size} ref(s) whose messages the client no longer sends — they can never compress): ${[...dead].sort((a, b) => a - b).slice(0, 4).map(fmt).join(", ")}${dead.size > 4 ? ", …" : ""}.`
+        : "";
+    return ` Live compressible refs: ${spans.join(", ")}${covered}. Retry NOW in this same turn with startId/endId inside that span.${deadNote}`;
 }
 
 const M_REF_NUM_RE = /^m0*(\d{1,7})$/i;

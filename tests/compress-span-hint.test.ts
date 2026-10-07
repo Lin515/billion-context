@@ -98,3 +98,34 @@ test("#1026: blocksCreated=0 receipt carries the live span", () => {
     assert.ok(out.startsWith("[Compression FAILED"), `failure receipt: ${out}`);
     assert.ok(out.includes("Live compressible refs: m00021–m00080"), `span inside receipt: ${out}`);
 });
+
+// #2362: dead refs can never compress — the advertised live span must subtract
+// them so a retry does not steer the model back into a doomed range.
+
+test("#2362: dead refs are carved out of the advertised live span", () => {
+    const ctx = makeFoldedCtx();
+    ctx.session.state.deadRefs = ["m00041", "m00042", "m00055"];
+    const hint = compressibleSpanHint(ctx.session.state);
+    assert.ok(hint.includes("Live compressible refs: m00021–m00040, m00043–m00054, m00056–m00080"), `spans minus dead: ${hint}`);
+    assert.ok(hint.includes("Excluded as DEAD (3 ref(s)"), `dead note present: ${hint}`);
+    assert.ok(hint.includes("m00041, m00042, m00055"), `dead refs named: ${hint}`);
+});
+
+test("#2362: an all-dead span says there are no live raw refs and drops the retry push", () => {
+    const ctx = makeFoldedCtx();
+    const dead = Object.keys(ctx.session.state.messageRefs.byRef)
+        .filter((r) => Number(r.slice(1)) > 20 && Number(r.slice(1)) <= 80);
+    ctx.session.state.deadRefs = dead;
+    const hint = compressibleSpanHint(ctx.session.state);
+    assert.ok(hint.includes("No live raw refs right now: every ref between m00021 and m00080 is DEAD"), `all-dead wording: ${hint}`);
+    assert.ok(!hint.includes("Retry NOW"), `no retry push into a doomed span: ${hint}`);
+});
+
+test("#2362: failure receipts advertise the dead-subtracted span", () => {
+    _setStoreForTest(new SessionStore({ enabled: false }));
+    const ctx = makeFoldedCtx();
+    ctx.session.state.deadRefs = ["m00041", "m00042", "m00055"];
+    const out = applyRanges(parseCompressInput({ content: [{ summary: "no bounds" }] }), ctx).text;
+    assert.ok(out.startsWith("[Compression FAILED"), `failure receipt: ${out}`);
+    assert.ok(out.includes("Live compressible refs: m00021–m00040, m00043–m00054, m00056–m00080"), `receipt span excludes dead: ${out}`);
+});
