@@ -18,7 +18,12 @@ billion-context/
 │   │   ├── context-window.ts     #   Context-window resolution (launcher model channel, beta headers)
 │   │   ├── dsh-compaction-guard.ts #   Rejects dsh whole-prefix compaction replays (#1729)
 │   │   ├── headers.ts            #   Client-provided id sanitization for dump filenames (#286)
+│   │   ├── inject.ts             #   Per-wire tool-injection wrappers + FORCE_TEXT_PROTOCOL switch (#1440)
 │   │   ├── observability.ts      #   Body dumps (dumps/req-*.json, raw/*), unrecognized-path stats
+│   │   ├── prepare-anthropic.ts  #   Anthropic request preparation (fold → rebuild → system/nudge injection) (#1440)
+│   │   ├── prepare-google.ts     #   Gemini request preparation incl. :countTokens twin (#1440)
+│   │   ├── prepare-openai.ts     #   OpenAI chat request preparation (#1440)
+│   │   ├── prepare-responses.ts  #   Responses request preparation + codex compact/prompt-cache helpers (#1440)
 │   │   ├── side-request.ts       #   Tool-surface check for auxiliary side requests
 │   │   └── stream-io.ts          #   Small response-body reader for non-2xx inspection
 │   ├── knobs.ts                  # Single knob resolver: env > config file > default (#2030)
